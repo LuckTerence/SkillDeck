@@ -29,7 +29,7 @@ struct SkillRowView: View {
                 // Inherited installation icons have reduced opacity, hover tooltip shows source
                 HStack(spacing: 4) {
                     ForEach(skill.installations) { installation in
-                        Image(systemName: installation.agentType.iconName).appFont(.caption)
+                        AgentIconView(agentType: installation.agentType, size: 13)
                             .foregroundStyle(Constants.AgentColors.color(for: installation.agentType))
                             // Reduce opacity for inherited installation icons to visually distinguish from direct installations
                             .opacity(installation.isTrulyInherited ? 0.4 : 1.0)

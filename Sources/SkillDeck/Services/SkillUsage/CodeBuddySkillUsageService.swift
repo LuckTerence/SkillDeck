@@ -25,7 +25,7 @@ actor CodeBuddySkillUsageService: SkillUsageProvider {
             cacheURL: agentsDirectory
                 .appendingPathComponent(".skilldeck-usage-cache-codebuddy.json"),
             fileManager: fileManager,
-            parse: Self.parse(line:),
+            parse: Self.parse,
             parserVersion: 2
         )
     }
@@ -40,7 +40,7 @@ actor CodeBuddySkillUsageService: SkillUsageProvider {
             directories: historyDirectories,
             cacheURL: cacheURL,
             fileManager: fileManager,
-            parse: Self.parse(line:),
+            parse: Self.parse,
             parserVersion: 2
         )
     }
@@ -49,9 +49,9 @@ actor CodeBuddySkillUsageService: SkillUsageProvider {
         scanner.scan()
     }
 
-    private static func parse(line: String) -> [SkillUsageEvent] {
+    private static let parse: @Sendable (String) -> [SkillUsageEvent] = { line in
         guard line.contains("function_call_result"),
-              line.contains(Self.skillMarker) else {
+              line.contains(CodeBuddySkillUsageService.skillMarker) else {
             return []
         }
 

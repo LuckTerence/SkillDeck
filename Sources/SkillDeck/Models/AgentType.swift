@@ -61,7 +61,7 @@ enum AgentType: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    /// SF Symbol icon name corresponding to the Agent
+    /// SF Symbol fallback used when no bundled brand logo is available
     /// SF Symbols is Apple's system icon library, similar to Material Icons
     var iconName: String {
         switch self {
@@ -79,6 +79,35 @@ enum AgentType: String, CaseIterable, Identifiable, Codable, Sendable {
         case .qoder: "q.circle"                     // Letter Q icon for Qoder
         case .qclaw: "hand.raised.circle"            // Hand/claw icon for QClaw
         case .workbuddy: "w.circle"                 // Letter W icon for WorkBuddy
+        }
+    }
+
+    /// Bundled brand logo file (SVG, no extension) in Resources/AgentIcons.
+    /// Returns nil when no public logo exists (QClaw), letting the UI fall back to `iconName`.
+    var iconResourceName: String? {
+        switch self {
+        case .claudeCode: "AgentClaudeCode"
+        case .codex: "AgentCodex"
+        case .geminiCLI: "AgentGeminiCLI"
+        case .copilotCLI: "AgentCopilotCLI"
+        case .openCode: "AgentOpenCode"
+        case .antigravity: "AgentAntigravity"
+        case .cursor: "AgentCursor"
+        case .kiro: "AgentKiro"
+        case .codeBuddy: "AgentCodeBuddy"
+        case .openClaw: "AgentOpenClaw"
+        case .trae: "AgentTrae"
+        case .qoder: "AgentQoder"
+        case .qclaw: nil
+        case .workbuddy: "AgentWorkBuddy"
+        }
+    }
+
+    /// Monochrome logos are drawn as template images so they follow the SwiftUI tint.
+    var usesTemplateIcon: Bool {
+        switch self {
+        case .copilotCLI, .openCode, .cursor, .qoder: true
+        default: false
         }
     }
 

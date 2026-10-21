@@ -10,7 +10,7 @@ struct AgentBadgeView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: agentType.iconName).appFont(.caption2)
+            AgentIconView(agentType: agentType, size: 12)
         Text(agentType.displayName)
             .appFont(.caption)
         }

@@ -43,6 +43,8 @@ let package = Package(
              resources: [
                 .copy("Resources/AppIcon.icns"),
                 .process("Resources/Localizations"),
+                .copy("Resources/AgentIcons"),
+                .copy("Resources/SidebarIcons"),
              ]
          ),
 

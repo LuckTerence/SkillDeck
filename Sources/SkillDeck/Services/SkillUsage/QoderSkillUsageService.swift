@@ -24,7 +24,7 @@ actor QoderSkillUsageService: SkillUsageProvider {
             cacheURL: agentsDirectory
                 .appendingPathComponent(".skilldeck-usage-cache-qoder.json"),
             fileManager: fileManager,
-            parse: Self.parse(line:)
+            parse: Self.parse
         )
     }
 
@@ -38,7 +38,7 @@ actor QoderSkillUsageService: SkillUsageProvider {
             directories: historyDirectories,
             cacheURL: cacheURL,
             fileManager: fileManager,
-            parse: Self.parse(line:)
+            parse: Self.parse
         )
     }
 
@@ -46,7 +46,7 @@ actor QoderSkillUsageService: SkillUsageProvider {
         scanner.scan()
     }
 
-    private static func parse(line: String) -> [SkillUsageEvent] {
+    private static let parse: @Sendable (String) -> [SkillUsageEvent] = { line in
         guard line.contains("Skill **") else { return [] }
 
         guard let data = line.data(using: .utf8),

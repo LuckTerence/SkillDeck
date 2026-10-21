@@ -175,7 +175,12 @@ struct LocalImportView: View {
                                 get: { viewModel.selectedAgents.contains(agentType) },
                                 set: { _ in viewModel.toggleAgentSelection(agentType) }
                             )) {
-                                Label(agentType.displayName, systemImage: agentType.iconName).appFont(.caption)
+                                Label {
+                                    Text(agentType.displayName)
+                                } icon: {
+                                    AgentIconView(agentType: agentType, size: 14)
+                                }
+                                .appFont(.caption)
                             }
                             .toggleStyle(.checkbox)
                             // Uninstalled Agents have reduced opacity but are still selectable

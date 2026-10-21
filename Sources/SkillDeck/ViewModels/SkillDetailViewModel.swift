@@ -89,7 +89,9 @@ final class SkillDetailViewModel {
                     configuration: config
                 ) { _, error in
                     if error != nil {
-                        self.feedbackMessage = "Failed to open terminal"
+                        Task { @MainActor [weak self] in
+                            self?.feedbackMessage = "Failed to open terminal"
+                        }
                     }
                 }
                 return
