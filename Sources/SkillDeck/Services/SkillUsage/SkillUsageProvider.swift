@@ -15,6 +15,7 @@ enum SkillUsageProviderFactory {
     static func makeDefaultProviders() -> [any SkillUsageProvider] {
         [
             CodexSkillUsageService(),
+            ClaudeCodeSkillUsageService(),
             CodeBuddySkillUsageService(),
             QoderSkillUsageService(),
             OpenCodeSkillUsageService(),
