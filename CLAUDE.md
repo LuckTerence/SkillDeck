@@ -103,7 +103,7 @@ The app supports HTTPS and SOCKS5 proxies (configured in Settings). Key componen
 | CodeBuddy | `~/.codebuddy/skills/` | `codebuddy` binary | Own directory only |
 | OpenClaw | `~/.openclaw/skills/` | `openclaw` binary | Own directory only |
 | Trae | `~/.trae/skills/` | `trae` binary | Own directory only |
-| Qoder | `~/.qoder/skills/` | `qoder` binary | Own directory only |
+| Qoder | `~/.qoder/skills/` | `qoder` binary | Own → `~/.agents/skills/` (legacy compat) |
 | QClaw | `~/.qclaw/skills/` | `qclaw` binary | Own directory only |
 | WorkBuddy | `~/.workbuddy/skills/` | `workbuddy` binary | Own directory only |
 

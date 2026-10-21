@@ -150,7 +150,7 @@ final class AgentTypeTests: XCTestCase {
     // MARK: - Qoder Agent Properties
 
     /// Verify all computed properties of the Qoder agent type
-    /// Qoder is an AI coding agent with standalone directory structure
+    /// Qoder reads its own directory plus the shared ~/.agents/skills/ compatibility directory
     func testQoderProperties() {
         let agent = AgentType.qoder
 
@@ -163,8 +163,10 @@ final class AgentTypeTests: XCTestCase {
         XCTAssertEqual(agent.iconName, "q.circle")
         XCTAssertEqual(agent.brandColor, "orange")
 
-        // Qoder does not read other agents' directories (standalone agent)
-        XCTAssertTrue(agent.additionalReadableSkillsDirectories.isEmpty)
+        // Qoder loads the legacy ~/.agents/skills/ compatibility directory by default
+        let additionalDirs = agent.additionalReadableSkillsDirectories
+        XCTAssertEqual(additionalDirs.count, 1)
+        XCTAssertEqual(additionalDirs[0].sourceAgent, .codex)
     }
 
     // MARK: - QClaw Agent Properties

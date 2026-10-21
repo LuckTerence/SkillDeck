@@ -183,6 +183,8 @@ enum AgentType: String, CaseIterable, Identifiable, Codable {
     ///   (See GitHub official documentation: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
     /// - OpenCode can read both ~/.claude/skills/ and ~/.agents/skills/
     ///   (See: https://opencode.ai/docs/skills/#place-files)
+    /// - Qoder loads the legacy ~/.agents/skills/ compatibility directory by default
+    ///   (skills.loadFromAgentsDirectory defaults to true)
     /// - Other Agents currently do not have cross-directory reading behavior
     ///
     /// Returns an array of tuples: (Directory URL, Source Agent Type)
@@ -207,6 +209,9 @@ enum AgentType: String, CaseIterable, Identifiable, Codable {
         case .cursor:
             // Cursor can also read Claude Code's skills directory
             return [(AgentType.claudeCode.skillsDirectoryURL, .claudeCode)]
+        case .qoder:
+            // Qoder CLI loads ~/.agents/skills/ by default via the legacy compatibility path
+            return [(Self.sharedSkillsDirectoryURL, .codex)]
         default:
             return []
         }
