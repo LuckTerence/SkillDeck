@@ -43,12 +43,6 @@ struct SkillDetailView: View {
 
                     Divider()
 
-                    // Best-effort historical usage recovered from local Codex session logs.
-                    // Keep this above the long Agent list so first-time users can discover it.
-                    usageSection(skill)
-
-                    Divider()
-
                     // Agent assignment section
                     agentAssignmentSection()
 
@@ -61,6 +55,7 @@ struct SkillDetailView: View {
             }
             .navigationTitle(skill.displayName)
             .task(id: skillID) {
+                await skillManager.loadSkillUsage()
                 await skillManager.maybeShowTranslationPackPromptIfNeeded(
                     translationEnabledOnThisScreen: showsChineseTranslation
                 )
@@ -192,123 +187,50 @@ struct SkillDetailView: View {
         }
     }
 
-    /// Agent assignment section (F06)
+    /// Agent assignment list with per-Agent usage evidence shown inline.
     @ViewBuilder
     private func agentAssignmentSection() -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Agent Assignment").appFont(.headline)
+            HStack(spacing: 6) {
+                Text("Agent Assignment").appFont(.headline)
+
+                Image(systemName: "info.circle")
+                    .foregroundStyle(.secondary)
+                    .help(localized(L10nKeys.usageCaveat))
+
+                if skillManager.skillUsageFailedLogCount > 0 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(localized(L10nKeys.usageIncompleteHelp))
+                }
+
+                Spacer()
+
+                usageScanControl
+            }
 
             AgentToggleView(skillID: skillID, viewModel: viewModel)
         }
     }
 
-    /// Usage evidence grouped by Agent. Codex is the first supported provider.
-    ///
-    /// The UI says "detected" rather than "total" because local history may be incomplete. This
-    /// distinction is important for deletion safety: zero matches is useful evidence, but it is not
-    /// proof that the skill is unreferenced by another Agent or project configuration.
-    private func usageSection(_ skill: Skill) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LText(key: L10nKeys.usageSectionTitle)
-                .appFont(.headline)
-
-            HStack {
-                Image(systemName: AgentType.codex.iconName)
-                    .foregroundStyle(Constants.AgentColors.color(for: .codex))
-                    .frame(width: 20)
-
-                Text(AgentType.codex.displayName)
-                    .appFont(.subheadline)
-                    .fontWeight(.semibold)
-
-                if case .available(_, let failedLogCount) = skillManager.codexSkillUsageScanState,
-                   failedLogCount > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .help(localized(L10nKeys.usageIncompleteHelp))
-                        .accessibilityLabel(localized(L10nKeys.usageIncompleteHelp))
-                }
-
-                Spacer()
-
-                if skillManager.codexSkillUsageScanState == .notScanned {
-                    Button(localized(L10nKeys.usageScanAction)) {
-                        Task { await skillManager.loadCodexSkillUsage() }
-                    }
-                    .controlSize(.small)
-                } else if skillManager.codexSkillUsageScanState != .scanning {
-                    Button {
-                        Task { await skillManager.loadCodexSkillUsage(forceRefresh: true) }
-                    } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                    }
-                    .controlSize(.small)
-                    .help(localized(L10nKeys.usageRefreshHelp))
-                }
+    @ViewBuilder
+    private var usageScanControl: some View {
+        if skillManager.isScanningSkillUsage {
+            ProgressView()
+                .controlSize(.small)
+        } else if skillManager.hasUnscannedSkillUsage {
+            Button(localized(L10nKeys.usageScanAction)) {
+                Task { await skillManager.loadSkillUsage() }
             }
-
-            Group {
-                switch skillManager.codexSkillUsageScanState {
-                case .notScanned:
-                    Label(localized(L10nKeys.usageNotScanned), systemImage: "clock.arrow.circlepath")
-                        .appFont(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                case .scanning:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        LText(key: L10nKeys.usageScanning)
-                            .appFont(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                case .unavailable:
-                    Label(localized(L10nKeys.usageUnavailable), systemImage: "questionmark.circle")
-                        .appFont(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                case .available:
-                    if let record = skillManager.codexSkillUsage(for: skill.id) {
-                        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                            GridRow {
-                                LText(key: L10nKeys.usageDetectedCalls)
-                                    .foregroundStyle(.secondary)
-                                Text(record.detectedInvocationCount.formatted())
-                            }
-
-                            GridRow {
-                                LText(key: L10nKeys.usageLastUsed)
-                                    .foregroundStyle(.secondary)
-                                if let lastDetectedAt = record.lastDetectedAt {
-                                    Text(lastDetectedAt.formatted(
-                                        Date.FormatStyle(date: .abbreviated, time: .shortened)
-                                            .locale(locale)
-                                    ))
-                                } else {
-                                    Text("—")
-                                }
-                            }
-
-                            GridRow {
-                                LText(key: L10nKeys.usageSource)
-                                    .foregroundStyle(.secondary)
-                                LText(key: L10nKeys.usageSourceCodex)
-                            }
-                        }
-                        .appFont(.subheadline)
-                    } else {
-                        Label(localized(L10nKeys.usageNeverDetected), systemImage: "clock.badge.questionmark")
-                            .appFont(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    LText(key: L10nKeys.usageCaveat)
-                        .appFont(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+            .controlSize(.small)
+        } else {
+            Button {
+                Task { await skillManager.loadSkillUsage(forceRefresh: true) }
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
             }
-            .padding(.leading, 28)
+            .controlSize(.small)
+            .help(localized(L10nKeys.usageRefreshHelp))
         }
     }
 

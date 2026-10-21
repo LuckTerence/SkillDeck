@@ -6,15 +6,15 @@ import Foundation
 /// treats a tool call that references a trusted local `SKILL.md` path as invocation evidence. The
 /// parser is deliberately isolated in one service so a future structured Codex event can replace
 /// this heuristic without changing the View or ViewModel layers.
-actor CodexSkillUsageService {
+actor CodexSkillUsageService: SkillUsageProvider {
+    /// Agent whose local history this adapter reads.
+    nonisolated var agentType: AgentType { .codex }
+
     /// Codex currently keeps active and archived history under separate directory trees.
     private let historyDirectories: [URL]
     private let trustedHomeDirectory: URL
     private let cacheURL: URL?
     private let fileManager: FileManager
-
-    /// Increment when the persisted cache schema or matching semantics change.
-    private static let cacheVersion = 2
 
     /// Production initializer based on the current macOS user's home directory.
     init(
@@ -51,15 +51,22 @@ actor CodexSkillUsageService {
     /// skills. Re-reading every history file once per detail page would scale poorly.
     func scan() -> SkillUsageScanResult {
         var cache = loadCache()
-        var refreshedFiles: [String: CachedLogResult] = [:]
-        var changedLogs: [URL: LogFingerprint] = [:]
+        var refreshedFiles: [String: SkillUsageCachedLog] = [:]
+        var changedLogs: [URL: SkillUsageLogFingerprint] = [:]
         var failedLogPaths: Set<String> = []
+        // Files whose counts come only from the previous scan because this run failed to read them.
+        var preservedLogPaths: Set<String> = []
 
-        for logURL in historyLogURLs() {
+        let enumeration = SkillUsageLogEnumerator.enumerate(
+            directories: historyDirectories,
+            fileManager: fileManager
+        )
+        for logURL in enumeration.urls {
             guard let fingerprint = fingerprint(for: logURL) else {
                 failedLogPaths.insert(logURL.path)
                 if let cached = cache.files[logURL.path] {
                     refreshedFiles[logURL.path] = cached
+                    preservedLogPaths.insert(logURL.path)
                 }
                 continue
             }
@@ -82,17 +89,26 @@ actor CodexSkillUsageService {
             // Keep the old fingerprint so a later refresh retries the failed file.
             if let cached = cache.files[path] {
                 refreshedFiles[path] = cached
+                preservedLogPaths.insert(path)
             }
+        }
+
+        // Enumeration failures hide files, so missing cache entries are not proof of deletion.
+        // Keep the last known counts for affected directories until a later scan succeeds.
+        let preservedFiles = enumeration.cachedFilesToPreserve(from: cache)
+        for (path, cached) in preservedFiles where refreshedFiles[path] == nil {
+            refreshedFiles[path] = cached
+            preservedLogPaths.insert(path)
         }
 
         // Dropping cache entries for deleted logs prevents stale usage evidence from surviving forever.
         cache.files = refreshedFiles
         saveCache(cache)
 
-        var merged: [String: MutableUsageRecord] = [:]
+        var merged: [String: MutableSkillUsageRecord] = [:]
         for file in refreshedFiles.values {
             for (skillID, fileRecord) in file.records {
-                var aggregate = merged[skillID] ?? MutableUsageRecord()
+                var aggregate = merged[skillID] ?? MutableSkillUsageRecord()
                 aggregate.detectedInvocationCount += fileRecord.detectedInvocationCount
                 if let timestamp = fileRecord.lastDetectedAt,
                    aggregate.lastDetectedAt == nil || timestamp > aggregate.lastDetectedAt! {
@@ -111,7 +127,8 @@ actor CodexSkillUsageService {
         return SkillUsageScanResult(
             records: records,
             scannedLogCount: refreshedFiles.count,
-            failedLogCount: failedLogPaths.count
+            preservedLogCount: preservedLogPaths.count,
+            failedLogCount: enumeration.failedSourceCount + failedLogPaths.count
         )
     }
 
@@ -120,7 +137,7 @@ actor CodexSkillUsageService {
     /// Stage one keeps only `response_item` events. Stage two keeps only those mentioning
     /// `SKILL.md`. This reduced roughly 1.8 GB of real-world history to a small candidate stream in
     /// local benchmarks, while the subsequent Swift parser remains responsible for correctness.
-    private func scanChangedLogs(_ logs: [URL: LogFingerprint]) -> ChangedLogScanResult {
+    private func scanChangedLogs(_ logs: [URL: SkillUsageLogFingerprint]) -> ChangedLogScanResult {
         guard !logs.isEmpty else { return ChangedLogScanResult() }
 
         let sortedURLs = logs.keys.sorted { $0.path < $1.path }
@@ -131,7 +148,7 @@ actor CodexSkillUsageService {
     /// Keep the common path fast with one grep pipeline, then isolate exceptional files by bisection.
     private func scanChangedLogBatch(
         _ urls: [URL],
-        fingerprintsByPath: [String: LogFingerprint]
+        fingerprintsByPath: [String: SkillUsageLogFingerprint]
     ) -> ChangedLogScanResult {
         guard let text = candidateLines(in: urls) else {
             guard urls.count > 1 else {
@@ -151,7 +168,7 @@ actor CodexSkillUsageService {
         }
 
         var perFileRecords = Dictionary(
-            uniqueKeysWithValues: urls.map { ($0.path, [String: MutableUsageRecord]()) }
+            uniqueKeysWithValues: urls.map { ($0.path, [String: MutableSkillUsageRecord]()) }
         )
 
         text.enumerateLines { prefixedLine, _ in
@@ -167,9 +184,9 @@ actor CodexSkillUsageService {
             perFileRecords[path] = records
         }
 
-        let files = perFileRecords.reduce(into: [String: CachedLogResult]()) { result, entry in
+        let files = perFileRecords.reduce(into: [String: SkillUsageCachedLog]()) { result, entry in
             guard let fingerprint = fingerprintsByPath[entry.key] else { return }
-            result[entry.key] = CachedLogResult(
+            result[entry.key] = SkillUsageCachedLog(
                 fingerprint: fingerprint,
                 records: entry.value.mapValues {
                     SkillUsageRecord(
@@ -229,40 +246,21 @@ actor CodexSkillUsageService {
         }
     }
 
-    /// Enumerate active and archived Codex histories recursively.
-    private func historyLogURLs() -> [URL] {
-        var result: [URL] = []
-
-        for directory in historyDirectories where fileManager.fileExists(atPath: directory.path) {
-            guard let enumerator = fileManager.enumerator(
-                at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else {
-                continue
-            }
-
-            for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
-                result.append(fileURL)
-            }
-        }
-
-        // Stable ordering makes tests deterministic and keeps future incremental caching possible.
-        return result.sorted { $0.path < $1.path }
-    }
-
     /// Size plus modification time is a cheap and sufficient cache fingerprint for append-only logs.
-    private func fingerprint(for url: URL) -> LogFingerprint? {
+    private func fingerprint(for url: URL) -> SkillUsageLogFingerprint? {
         guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
               let fileSize = values.fileSize,
               let modificationDate = values.contentModificationDate else {
             return nil
         }
-        return LogFingerprint(fileSize: UInt64(fileSize), modificationDate: modificationDate)
+        return SkillUsageLogFingerprint(
+            fileSize: UInt64(fileSize),
+            modificationDate: modificationDate
+        )
     }
 
     /// Parse one JSONL event and merge any trusted skill references into the index.
-    private func consume(line: String, records: inout [String: MutableUsageRecord]) {
+    private func consume(line: String, records: inout [String: MutableSkillUsageRecord]) {
         // Most history lines do not mention a skill. This cheap filter avoids JSON parsing for them.
         guard line.contains("SKILL.md"),
               let data = line.data(using: .utf8),
@@ -282,9 +280,10 @@ actor CodexSkillUsageService {
         let skillIDs = trustedSkillIDs(in: toolInput)
         guard !skillIDs.isEmpty else { return }
 
-        let timestamp = (object["timestamp"] as? String).flatMap(Self.parseTimestamp)
+        let timestamp = (object["timestamp"] as? String)
+            .flatMap(SkillUsageTimestampParser.parseISO8601)
         for skillID in skillIDs {
-            var record = records[skillID] ?? MutableUsageRecord()
+            var record = records[skillID] ?? MutableSkillUsageRecord()
             record.detectedInvocationCount += 1
             if let timestamp, record.lastDetectedAt == nil || timestamp > record.lastDetectedAt! {
                 record.lastDetectedAt = timestamp
@@ -372,62 +371,18 @@ actor CodexSkillUsageService {
         return nil
     }
 
-    /// Codex timestamps are ISO-8601 and commonly include fractional seconds.
-    private static func parseTimestamp(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) {
-            return date
-        }
-
-        let regular = ISO8601DateFormatter()
-        regular.formatOptions = [.withInternetDateTime]
-        return regular.date(from: value)
-    }
-
     /// Read a versioned local cache. Invalid or old files safely fall back to a clean first scan.
-    private func loadCache() -> UsageCache {
-        guard let cacheURL,
-              let data = try? Data(contentsOf: cacheURL),
-              let decoded = try? JSONDecoder().decode(UsageCache.self, from: data),
-              decoded.version == Self.cacheVersion else {
-            return UsageCache(version: Self.cacheVersion, files: [:])
-        }
-        return decoded
+    private func loadCache() -> SkillUsageLogCache {
+        SkillUsageLogCache.load(from: cacheURL)
     }
 
     /// Persist atomically so an interrupted app launch cannot leave a half-written cache.
-    private func saveCache(_ cache: UsageCache) {
-        guard let cacheURL else { return }
-        let parent = cacheURL.deletingLastPathComponent()
-        do {
-            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(cache).write(to: cacheURL, options: .atomic)
-        } catch {
-            // Usage remains available in memory even when cache persistence is not permitted.
-        }
-    }
-
-    /// Mutable accumulator kept private so the public model remains immutable.
-    private struct MutableUsageRecord {
-        var detectedInvocationCount = 0
-        var lastDetectedAt: Date?
-    }
-
-    private struct UsageCache: Codable {
-        let version: Int
-        var files: [String: CachedLogResult]
-    }
-
-    private struct CachedLogResult: Codable {
-        let fingerprint: LogFingerprint
-        let records: [String: SkillUsageRecord]
+    private func saveCache(_ cache: SkillUsageLogCache) {
+        cache.save(to: cacheURL, fileManager: fileManager)
     }
 
     private struct ChangedLogScanResult {
-        var files: [String: CachedLogResult] = [:]
+        var files: [String: SkillUsageCachedLog] = [:]
         var failedPaths: Set<String> = []
 
         func merging(_ other: ChangedLogScanResult) -> ChangedLogScanResult {
@@ -438,10 +393,5 @@ actor CodexSkillUsageService {
                 failedPaths: failedPaths.union(other.failedPaths)
             )
         }
-    }
-
-    private struct LogFingerprint: Codable, Equatable {
-        let fileSize: UInt64
-        let modificationDate: Date
     }
 }

@@ -92,16 +92,14 @@
 "dashboard.language.menuLabel" = "Language";
 "dashboard.language.menuHelp" = "Switch app language";
 
-"usage.section.title" = "Usage";
 "usage.scan.action" = "Scan History";
-"usage.notScanned" = "Usage history has not been scanned on this device";
-"usage.scanning" = "Scanning local Codex history...";
-"usage.detectedCalls" = "Detected uses";
-"usage.lastUsed" = "Last detected";
-"usage.neverDetected" = "No usage was detected in available Codex history";
-"usage.unavailable" = "Codex history is unavailable; previous usage is unknown";
-"usage.source" = "Source";
-"usage.source.codex" = "Local Codex history";
-"usage.caveat" = "Best-effort evidence only. Missing logs, other Agents, and project references are not included.";
-"usage.refresh.help" = "Rescan Codex usage history";
-"usage.incomplete.help" = "Some Codex history files could not be read; usage statistics may be incomplete";
+"usage.scanning" = "Scanning local Agent history...";
+"usage.refresh.help" = "Rescan skill usage history";
+"usage.incomplete.help" = "Some Agent history files or directories could not be read; usage statistics may be incomplete";
+"usage.caveat" = "Detected from each Agent's local history. Missing logs and project references are not included.";
+"usage.agent.usesFormat" = "%d uses";
+"usage.agent.lastUsedFormat" = "Last used %@";
+"usage.agent.neverDetected" = "No local usage detected";
+"usage.agent.scanning" = "Scanning usage...";
+"usage.agent.unreadable" = "Local history could not be read";
+"usage.agent.unavailable" = "No local history";
