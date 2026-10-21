@@ -2,7 +2,7 @@ import Foundation
 
 /// AgentType represents supported AI code assistant types
 /// Similar to Java enum, but Swift enum is more powerful, supporting associated values and methods
-enum AgentType: String, CaseIterable, Identifiable, Codable {
+enum AgentType: String, CaseIterable, Identifiable, Codable, Sendable {
     case claudeCode = "claude-code"
     case codex = "codex"
     case geminiCLI = "gemini-cli"

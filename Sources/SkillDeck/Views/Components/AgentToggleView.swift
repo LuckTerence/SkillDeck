@@ -32,6 +32,8 @@ private struct AgentToggleRow: View {
     let agentType: AgentType
     let viewModel: SkillDetailViewModel
     @Environment(SkillManager.self) private var skillManager
+    @Environment(\.locale) private var locale
+    @Environment(\.localizationBundle) private var localizationBundle
 
     /// Get the latest skill data from SkillManager to ensure real-time updates
     /// Accessing skillManager.skills here ensures SwiftUI tracks this dependency
@@ -85,7 +87,10 @@ private struct AgentToggleRow: View {
                 .foregroundStyle(Constants.AgentColors.color(for: agentType))
                 .frame(width: 20)
 
-            Text(agentType.displayName)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agentType.displayName)
+                usageSummary
+            }
 
             Spacer()
 
@@ -120,5 +125,77 @@ private struct AgentToggleRow: View {
             .disabled(isToggleDisabled)
         }
         .padding(.vertical, 2)
+    }
+
+    /// Compact, read-only usage evidence under the Agent name.
+    ///
+    /// This intentionally renders nothing before a scan. Showing "0 uses" for an unscanned Agent
+    /// would make "unknown" look like "never used".
+    @ViewBuilder
+    private var usageSummary: some View {
+        if skillManager.isSkillUsageSupported(agentType) {
+            switch skillManager.skillUsageScanState(for: agentType) {
+            case .notScanned:
+                EmptyView()
+
+            case .scanning:
+                LText(key: L10nKeys.usageAgentScanning)
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .failed:
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    LText(key: L10nKeys.usageAgentUnreadable)
+                }
+                .appFont(.caption)
+                .foregroundStyle(.orange)
+
+            case .unavailable:
+                LText(key: L10nKeys.usageAgentUnavailable)
+                    .appFont(.caption)
+                    .foregroundStyle(.tertiary)
+
+            case .available(_, let preservedLogCount, _):
+                if let record = skillManager.skillUsage(for: skillID, agent: agentType) {
+                    HStack(spacing: 4) {
+                        Text(String(
+                            format: localized(L10nKeys.usageAgentUsesFormat),
+                            record.detectedInvocationCount
+                        ))
+                        .appFont(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(lastUsedHelp(record))
+
+                        // Keep showing the last known count, but mark that it may come from
+                        // the previous scan because this scan could not read the history.
+                        if preservedLogCount > 0 {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .help(localized(L10nKeys.usageIncompleteHelp))
+                        }
+                    }
+                } else {
+                    LText(key: L10nKeys.usageAgentNeverDetected)
+                        .appFont(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private func localized(_ key: String) -> String {
+        L10n.string(key, bundle: localizationBundle, locale: locale)
+    }
+
+    private func lastUsedHelp(_ record: SkillUsageRecord) -> String {
+        guard let lastDetectedAt = record.lastDetectedAt else {
+            return localized(L10nKeys.usageCaveat)
+        }
+
+        let date = lastDetectedAt.formatted(
+            Date.FormatStyle(date: .abbreviated, time: .shortened).locale(locale)
+        )
+        return String(format: localized(L10nKeys.usageAgentLastUsedFormat), date)
     }
 }

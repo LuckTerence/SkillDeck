@@ -102,14 +102,14 @@ final class SkillManager {
     /// so the UI can still generate GitHub compare URLs after a refresh.
     private var cachedRemoteCommitHashes: [String: String] = [:]
 
-    /// Best-effort Codex invocation evidence, indexed by `Skill.id`.
+    /// Best-effort invocation evidence per Agent, indexed by `Skill.id`.
     ///
-    /// Keeping the index in the shared manager lets skill detail pages reuse one history scan
-    /// instead of performing duplicate filesystem work.
-    var codexSkillUsageRecords: [String: SkillUsageRecord] = [:]
+    /// Keeping all providers' indexes in the shared manager lets skill detail pages reuse one
+    /// history scan instead of performing duplicate filesystem work.
+    var skillUsageRecords: [AgentType: [String: SkillUsageRecord]] = [:]
 
-    /// Current coverage state for Codex's local history scan.
-    var codexSkillUsageScanState: SkillUsageScanState = .notScanned
+    /// Current coverage state per Agent. Missing entries mean `.notScanned`.
+    var skillUsageScanStates: [AgentType: SkillUsageScanState] = [:]
 
     // MARK: - App Update State (application self-update status)
 
@@ -144,8 +144,8 @@ final class SkillManager {
     /// Stored in ~/.agents/.skilldeck-cache.json, doesn't pollute npx skills' lock file format
     private let commitHashCache = CommitHashCache()
 
-    /// Agent-specific adapter for reconstructing historical Codex skill invocations.
-    private let codexSkillUsageService: CodexSkillUsageService
+    /// Agent-specific adapters for reconstructing historical skill invocations.
+    private let skillUsageProviders: [AgentType: any SkillUsageProvider]
 
     private let translationService = TranslationService()
 
@@ -164,41 +164,102 @@ final class SkillManager {
 
     // MARK: - Initialization
 
-    init(codexSkillUsageService: CodexSkillUsageService = CodexSkillUsageService()) {
-        self.codexSkillUsageService = codexSkillUsageService
+    init(
+        skillUsageProviders: [any SkillUsageProvider] = SkillUsageProviderFactory.makeDefaultProviders()
+    ) {
+        self.skillUsageProviders = Dictionary(
+            skillUsageProviders.map { ($0.agentType, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         setupFileWatcher()
     }
 
-    /// Load the Codex usage index once, or rebuild it when the user explicitly refreshes.
+    /// Scan every supported Agent once on first use, or rescan all providers when forced.
     ///
-    /// The service actor performs file I/O away from the main actor. Only the small final result is
-    /// assigned back to observable UI state on the main actor.
-    func loadCodexSkillUsage(forceRefresh: Bool = false) async {
-        if codexSkillUsageScanState == .scanning {
-            return
+    /// Providers run concurrently because each one has an independent history source. Results are
+    /// collected before touching observable state so the main actor is not used inside the task
+    /// group body.
+    func loadSkillUsage(forceRefresh: Bool = false) async {
+        let providers = skillUsageProviders.values.filter { provider in
+            let state = skillUsageScanState(for: provider.agentType)
+            if state == .scanning {
+                return false
+            }
+            return forceRefresh || state == .notScanned
+        }
+        guard !providers.isEmpty else { return }
+
+        for provider in providers {
+            skillUsageScanStates[provider.agentType] = .scanning
         }
 
-        if !forceRefresh, case .available = codexSkillUsageScanState {
-            return
+        let results = await withTaskGroup(
+            of: (AgentType, SkillUsageScanResult).self
+        ) { group in
+            for provider in providers {
+                let agentType = provider.agentType
+                group.addTask {
+                    (agentType, await provider.scan())
+                }
+            }
+
+            var collected: [(AgentType, SkillUsageScanResult)] = []
+            for await result in group {
+                collected.append(result)
+            }
+            return collected
         }
 
-        codexSkillUsageScanState = .scanning
-        let result = await codexSkillUsageService.scan()
-        codexSkillUsageRecords = result.records
-
-        if result.scannedLogCount > 0 {
-            codexSkillUsageScanState = .available(
-                scannedLogCount: result.scannedLogCount,
-                failedLogCount: result.failedLogCount
-            )
-        } else {
-            codexSkillUsageScanState = .unavailable
+        for (agentType, result) in results {
+            skillUsageRecords[agentType] = result.records
+            if result.scannedLogCount > 0 {
+                skillUsageScanStates[agentType] = .available(
+                    scannedLogCount: result.scannedLogCount,
+                    preservedLogCount: result.preservedLogCount,
+                    failedLogCount: result.failedLogCount
+                )
+            } else if result.failedLogCount > 0 {
+                // A source exists but none of it could be read. Keep this distinct from
+                // `.unavailable` so the UI can warn instead of claiming there is no history.
+                skillUsageScanStates[agentType] = .failed(failedLogCount: result.failedLogCount)
+            } else {
+                skillUsageScanStates[agentType] = .unavailable
+            }
         }
     }
 
-    /// Return usage evidence for one skill after the shared index has been loaded.
-    func codexSkillUsage(for skillID: String) -> SkillUsageRecord? {
-        codexSkillUsageRecords[skillID]
+    /// Return usage evidence for one skill and Agent after the shared index has been loaded.
+    func skillUsage(for skillID: String, agent: AgentType) -> SkillUsageRecord? {
+        skillUsageRecords[agent]?[skillID]
+    }
+
+    func skillUsageScanState(for agent: AgentType) -> SkillUsageScanState {
+        skillUsageScanStates[agent] ?? .notScanned
+    }
+
+    func isSkillUsageSupported(_ agent: AgentType) -> Bool {
+        skillUsageProviders[agent] != nil
+    }
+
+    var isScanningSkillUsage: Bool {
+        skillUsageProviders.keys.contains { skillUsageScanState(for: $0) == .scanning }
+    }
+
+    var hasUnscannedSkillUsage: Bool {
+        skillUsageProviders.keys.contains { skillUsageScanState(for: $0) == .notScanned }
+    }
+
+    var skillUsageFailedLogCount: Int {
+        skillUsageScanStates.values.reduce(0) { partial, state in
+            switch state {
+            case .available(_, _, let failedLogCount):
+                return partial + failedLogCount
+            case .failed(let failedLogCount):
+                return partial + failedLogCount
+            case .notScanned, .scanning, .unavailable:
+                return partial
+            }
+        }
     }
 
     /// Translate a short English paragraph into Simplified Chinese (zh-CN).
