@@ -83,7 +83,7 @@ private struct AgentToggleRow: View {
 
     var body: some View {
         HStack {
-            Image(systemName: agentType.iconName)
+            AgentIconView(agentType: agentType, size: 16)
                 .foregroundStyle(Constants.AgentColors.color(for: agentType))
                 .frame(width: 20)
 

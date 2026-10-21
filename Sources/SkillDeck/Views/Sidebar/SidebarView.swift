@@ -25,6 +25,38 @@ enum SidebarItem: Hashable {
             return nil
         }
     }
+
+    /// Bundled overview icon rendered by `SidebarIconView`.
+    var iconResourceName: String? {
+        switch self {
+        case .dashboard: "SidebarDashboard"
+        case .registry: "SidebarRegistry"
+        case .clawHub: "SidebarClawHub"
+        case .agent, .settings: nil
+        }
+    }
+
+    /// SF Symbol used if the bundled icon is unavailable.
+    var iconFallbackSymbol: String {
+        switch self {
+        case .dashboard: "square.grid.2x2"
+        case .registry: "globe"
+        case .clawHub: "shippingbox"
+        case .agent(let agentType): agentType.iconName
+        case .settings: "gearshape"
+        }
+    }
+
+    /// Brand colour used for the icon and the selected-row background.
+    var brandColor: Color {
+        switch self {
+        case .dashboard: Color(red: 0.55, green: 0.36, blue: 0.96)  // SkillDeck purple #8B5CF6
+        case .registry: .accentColor
+        case .clawHub: Color(red: 0.92, green: 0.50, blue: 0.08)    // Amber #EB8014
+        case .agent(let agentType): Constants.AgentColors.color(for: agentType)
+        case .settings: .accentColor
+        }
+    }
 }
 
 /// SidebarView is the app's sidebar navigation
@@ -80,7 +112,7 @@ struct SidebarView: View {
                     Label {
                         LText(key: L10nKeys.sidebarDashboard)
                     } icon: {
-                        Image(systemName: "square.grid.2x2")
+                        SidebarIconView(item: .dashboard)
                     }
                 }
                 .badge(skillManager.skills.count)
@@ -101,7 +133,7 @@ struct SidebarView: View {
                     Label {
                         LText(key: L10nKeys.sidebarRegistry)
                     } icon: {
-                        Image(systemName: "globe")
+                        SidebarIconView(item: .registry)
                     }
                 }
                 .listRowBackground(
@@ -116,7 +148,7 @@ struct SidebarView: View {
                     Label {
                         LText(key: L10nKeys.sidebarClawHub)
                     } icon: {
-                        Image(systemName: "shippingbox")
+                        SidebarIconView(item: .clawHub)
                     }
                 }
                 .listRowBackground(
@@ -142,7 +174,7 @@ struct SidebarView: View {
                                 .foregroundStyle(selection == .agent(agentType) ? .primary : .secondary)
                                 .fontWeight(selection == .agent(agentType) ? .semibold : .regular)
                         } icon: {
-                            Image(systemName: agentType.iconName)
+                            AgentIconView(agentType: agentType, size: 16)
                                 .foregroundStyle(Constants.AgentColors.color(for: agentType))
                         }
                     }
@@ -375,14 +407,8 @@ struct SidebarView: View {
     /// while still looking subtle and native.
     private func rowBackground(for item: SidebarItem) -> Color {
         if selection == item {
-            // Selected state: if Agent item, use that Agent's brand color; Dashboard/Registry/Settings keep system accentColor
-            // Swift 5.9 if/else expression syntax: can use if-else directly in let assignment, similar to ternary but supports pattern matching
-            let baseColor: Color = if case .agent(let agentType) = item {
-                Constants.AgentColors.color(for: agentType)
-            } else {
-                Color.accentColor
-            }
-            return baseColor.opacity(0.2)
+            // Selected state uses the item's brand colour, matching its icon.
+            return item.brandColor.opacity(0.2)
         } else if hoveredItem == item {
             // Hover state: very light gray background, hinting "this is clickable"
             return Color.primary.opacity(0.08)
