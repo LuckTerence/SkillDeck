@@ -36,7 +36,7 @@ SkillDeck is a macOS GUI app that manages skills across 14 AI agents. Skills are
 ~/.codebuddy/skills/           # CodeBuddy skills
 ~/.openclaw/skills/            # OpenClaw skills
 ~/.trae/skills/                # Trae skills
-~/.qoder/skills/               # Qoder skills
+~/.qoder/skills/               # Qoder skills (also reads ~/.agents/skills/ by default)
 ~/.qclaw/skills/               # QClaw skills
 ~/.workbuddy/skills/           # WorkBuddy skills
 ~/.gemini/antigravity/skills/  # Antigravity skills
@@ -51,6 +51,7 @@ SkillDeck is a macOS GUI app that manages skills across 14 AI agents. Skills are
   - **Copilot** reads `~/.claude/skills/`
   - **OpenCode** reads `~/.claude/skills/` and `~/.agents/skills/`
   - **Cursor** reads `~/.claude/skills/`
+  - **Qoder** reads `~/.agents/skills/` by default (`skills.loadFromAgentsDirectory`)
 
 ## Default Agent Configuration
 

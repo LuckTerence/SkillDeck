@@ -36,7 +36,7 @@ OpenClaw     → ~/.openclaw/skills/
 Qoder        → ~/.qoder/skills/
 ```
 
-但某些 Agent 会额外读取其他 Agent 的目录。例如 Copilot CLI 同时读取 `~/.copilot/skills/` 和 `~/.claude/skills/`，Cursor 同时读取 `~/.cursor/skills/` 和 `~/.claude/skills/`。
+但某些 Agent 会额外读取其他 Agent 的目录。例如 Copilot CLI 同时读取 `~/.copilot/skills/` 和 `~/.claude/skills/`，Cursor 同时读取 `~/.cursor/skills/` 和 `~/.claude/skills/`，Qoder 默认还会读取 `~/.agents/skills/`（`skills.loadFromAgentsDirectory` 默认为 `true`）。
 
 ### 继承安装的定义
 

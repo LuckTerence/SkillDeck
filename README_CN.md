@@ -108,7 +108,7 @@ swift test
 | [CodeBuddy](https://www.codebuddy.ai) | `~/.codebuddy/skills/` | `codebuddy` 二进制文件 | 仅自身目录 |
 | [OpenClaw](https://openclaw.ai) | `~/.openclaw/skills/` | `openclaw` 二进制文件 | 仅自身目录 |
 | [Trae](https://www.trae.ai) | `~/.trae/skills/` | `trae` 二进制文件 | 仅自身目录 |
-| [Qoder](https://qoder.ai) | `~/.qoder/skills/` | `qoder` 二进制文件 | 仅自身目录 |
+| [Qoder](https://qoder.ai) | `~/.qoder/skills/` | `qoder` 二进制文件 | 自身 → `~/.agents/skills/`（历史兼容） |
 
 ## 架构
 
