@@ -27,13 +27,8 @@
 ## 截图
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/crossoverJie/images@main/images/images20260213123118.png" alt="仪表盘概览" width="800" />
-  <img src="https://cdn.jsdelivr.net/gh/crossoverJie/images@main/images/images20260216200457.png" alt="仪表盘概览" width="800" />
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/skill-detail.png" alt="技能详情" width="300" height="240"/>
-  <img src="https://cdn.jsdelivr.net/gh/crossoverJie/images@main/images/images20260213122805.png" alt="安装" width="300" height="240"/>
+  <img src="https://cdn.jsdelivr.net/gh/crossoverJie/images@main/images/imagesdashboard.png" alt="仪表盘概览" width="800" />
+  <img src="https://cdn.jsdelivr.net/gh/crossoverJie/images@main/images/imagesregistry.png" alt="技能市场" width="800" />
 </p>
 
 ## 功能特性
