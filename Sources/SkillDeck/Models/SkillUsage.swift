@@ -47,3 +47,16 @@ struct SkillUsageEvent: Equatable, Sendable {
     let skillID: String
     let timestamp: Date?
 }
+
+/// Dashboard-facing aggregate derived from per-Agent usage indexes.
+///
+/// This is not persisted. `count` follows the current Dashboard filter: a single Agent's
+/// detected count when filtering, otherwise the sum over every readable Agent history.
+/// `agentCounts` is narrowed to the same scope, so the badge and its tooltip always agree.
+struct SkillUsageSummary: Equatable, Sendable {
+    let count: Int
+    let agentCounts: [AgentType: Int]
+    /// True when a relevant Agent is unscanned/scanning or its history could not be read.
+    /// Agents outside the current Dashboard scope are ignored.
+    let isPartial: Bool
+}

@@ -7,9 +7,20 @@ struct SkillRowView: View {
 
     let skill: Skill
 
+    var usageSummary: SkillUsageSummary? = nil
+    var showsUnknownUsage: Bool = false
+    /// True when a relevant Agent is unscanned/scanning. This is scope-aware:
+    /// do not read the global `skillManager.isScanningSkillUsage` here.
+    var usageIsScanning: Bool = false
+    /// Locale key chosen by the ViewModel for the unknown placeholder
+    /// (scanning / unreadable / no local history).
+    var unknownUsageHelpKey: String = L10nKeys.usageAgentUnavailable
+
     /// Get SkillManager from environment for reading updateStatuses dictionary
     /// @Environment is SwiftUI's dependency injection mechanism (similar to Spring's @Autowired)
     @Environment(SkillManager.self) private var skillManager
+    @Environment(\.localizationBundle) private var localizationBundle
+    @Environment(\.locale) private var locale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -21,6 +32,8 @@ struct SkillRowView: View {
 
                 // F12: Display different indicator icons based on update check status
                 updateStatusIndicator
+
+                usageBadge
 
                 Spacer()
 
@@ -105,5 +118,59 @@ struct SkillRowView: View {
                 .foregroundStyle(.yellow).appFont(.caption)
                 .help("Check failed: \(message)")
         }
+    }
+
+    // MARK: - Usage Badge
+
+    /// Detected invocation count for the current Dashboard scope.
+    ///
+    /// Unknown usage is rendered as an em dash rather than `0` so "not scanned" and "never used"
+    /// never look alike. The tooltip details use the same scope as the number.
+    @ViewBuilder
+    private var usageBadge: some View {
+        if let summary = usageSummary {
+            HStack(spacing: 3) {
+                Image(systemName: "chart.bar.xaxis")
+                Text(String(format: localized(L10nKeys.usageAgentUsesFormat), summary.count))
+                if summary.isPartial {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(localized(L10nKeys.usageIncompleteHelp))
+                }
+            }
+            .appFont(.caption)
+            .foregroundStyle(.secondary)
+            .help(usageTooltip(summary))
+        } else if showsUnknownUsage {
+            if usageIsScanning {
+                ProgressView().controlSize(.mini)
+            } else {
+                Text("—")
+                    .appFont(.caption)
+                    .foregroundStyle(.tertiary)
+                    .help(localized(unknownUsageHelpKey))
+            }
+        }
+    }
+
+    private func usageTooltip(_ summary: SkillUsageSummary) -> String {
+        let lines = summary.agentCounts
+            .sorted {
+                ($0.key.displayName, $0.key.rawValue)
+                    < ($1.key.displayName, $1.key.rawValue)
+            }
+            .map { agent, count in
+                "\(agent.displayName): \(String(format: localized(L10nKeys.usageAgentUsesFormat), count))"
+            }
+
+        var parts = [lines.joined(separator: "\n"), localized(L10nKeys.usageCaveat)]
+        if summary.isPartial {
+            parts.append(localized(L10nKeys.usageIncompleteHelp))
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func localized(_ key: String) -> String {
+        L10n.string(key, bundle: localizationBundle, locale: locale)
     }
 }

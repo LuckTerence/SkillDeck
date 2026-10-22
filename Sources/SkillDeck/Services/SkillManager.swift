@@ -179,8 +179,18 @@ final class SkillManager {
     /// Providers run concurrently because each one has an independent history source. Results are
     /// collected before touching observable state so the main actor is not used inside the task
     /// group body.
-    func loadSkillUsage(forceRefresh: Bool = false) async {
+    ///
+    /// - Parameter agentTypes: When provided, only these Agents are scanned. This lets the
+    ///   Dashboard defer work until the user actually asks for usage-based sorting, and keeps
+    ///   filtering to one Agent from scanning every provider.
+    func loadSkillUsage(
+        forceRefresh: Bool = false,
+        agentTypes: Set<AgentType>? = nil
+    ) async {
         let providers = skillUsageProviders.values.filter { provider in
+            if let agentTypes, !agentTypes.contains(provider.agentType) {
+                return false
+            }
             let state = skillUsageScanState(for: provider.agentType)
             if state == .scanning {
                 return false
@@ -239,6 +249,11 @@ final class SkillManager {
 
     func isSkillUsageSupported(_ agent: AgentType) -> Bool {
         skillUsageProviders[agent] != nil
+    }
+
+    /// Agents that have a usage-history provider, in AgentType declaration order.
+    var skillUsageSupportedAgents: [AgentType] {
+        AgentType.allCases.filter { skillUsageProviders[$0] != nil }
     }
 
     var isScanningSkillUsage: Bool {

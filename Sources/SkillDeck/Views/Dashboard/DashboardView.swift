@@ -34,7 +34,13 @@ struct DashboardView: View {
             } else {
                 // Skill list
                 List(viewModel.filteredSkills, selection: $selectedSkillID) { skill in
-                    SkillRowView(skill: skill)
+                    SkillRowView(
+                        skill: skill,
+                        usageSummary: viewModel.usageSummary(for: skill),
+                        showsUnknownUsage: viewModel.sortOrder == .usage,
+                        usageIsScanning: viewModel.isRelevantUsagePending,
+                        unknownUsageHelpKey: viewModel.unknownUsageHelpKey
+                    )
                         .tag(skill.id)
                         // contextMenu is macOS's right-click menu
                         .contextMenu {
@@ -99,9 +105,9 @@ struct DashboardView: View {
                                     // Click selected sort field → toggle ascending/descending
                                     viewModel.sortDirection = viewModel.sortDirection.toggled
                                 } else {
-                                    // Click new sort field → switch to that field, reset to ascending
+                                    // Click new sort field → switch to that field and use its default direction
                                     viewModel.sortOrder = order
-                                    viewModel.sortDirection = .ascending
+                                    viewModel.sortDirection = order.defaultDirection
                                 }
                             } label: {
                                 // HStack horizontal layout: icon + text + sort direction arrow
@@ -125,6 +131,18 @@ struct DashboardView: View {
                         Image(systemName: viewModel.sortDirection.iconName).appFont(.caption2)
                             // imageScale controls SF Symbol size
                             .imageScale(.small)
+                    }
+                }
+
+                if viewModel.sortOrder == .usage {
+                    if viewModel.isRelevantUsagePending {
+                        ProgressView()
+                            .controlSize(.small)
+                            .help(L10n.string(L10nKeys.usageScanning, bundle: localizationBundle, locale: locale))
+                    } else if viewModel.relevantUsageFailedLogCount > 0 {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .help(L10n.string(L10nKeys.usageIncompleteHelp, bundle: localizationBundle, locale: locale))
                     }
                 }
             }
@@ -160,6 +178,26 @@ struct DashboardView: View {
                 .cornerRadius(8)
                 .padding()
             }
+        }
+        // Usage sorting is lazy: scan only when the user actually asks for it, and only the
+        // Agents contributing to the current scope. Re-check on filter changes so switching
+        // back to "all" still scans Agents that have not been touched yet.
+        .onChange(of: viewModel.sortOrder) { _, newOrder in
+            guard newOrder == .usage else { return }
+            scanRelevantUsageIfNeeded()
+        }
+        .onChange(of: viewModel.selectedAgentFilter) { _, _ in
+            guard viewModel.sortOrder == .usage else { return }
+            scanRelevantUsageIfNeeded()
+        }
+    }
+
+    private func scanRelevantUsageIfNeeded() {
+        guard viewModel.hasUnscannedRelevantUsage else { return }
+        Task {
+            await skillManager.loadSkillUsage(
+                agentTypes: Set(viewModel.relevantUsageAgents)
+            )
         }
     }
 
