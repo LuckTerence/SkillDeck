@@ -16,6 +16,7 @@ enum SkillUsageProviderFactory {
         [
             CodexSkillUsageService(),
             ClaudeCodeSkillUsageService(),
+            CopilotSkillUsageService(),
             CodeBuddySkillUsageService(),
             QoderSkillUsageService(),
             OpenCodeSkillUsageService(),
