@@ -555,9 +555,11 @@ section { margin-bottom: 72px; }
   flex-shrink: 0;
   overflow: hidden;
 }
-.agents-grid .agent-icon svg {
+.agents-grid .agent-icon svg,
+.agents-grid .agent-icon img {
   width: 20px;
   height: 20px;
+  object-fit: contain;
 }
 .agents-grid .agent-name {
   font-family: var(--serif);
@@ -828,6 +830,10 @@ footer.foot {
         <p class="what">Compares local commit hashes against the remote HEAD. A badge appears when updates are available; pull the latest changes with one click. No manual git fetch needed.</p>
       </li>
       <li>
+        <p class="name">Usage Insights<small>Know what earns its keep</small></p>
+        <p class="what">Tracks how often each skill is invoked across Codex, Claude Code, and Copilot CLI. Sort the dashboard by usage to surface skills you never use and clean them out with confidence.</p>
+      </li>
+      <li>
         <p class="name">SKILL.md Editor<small>Form + markdown split</small></p>
         <p class="what">A split-pane editor: structured form fields for YAML frontmatter on the left, live markdown preview on the right. Edit name, description, version, and agent compatibility without touching raw YAML.</p>
       </li>
@@ -852,59 +858,59 @@ footer.foot {
 
     <ol class="agents-grid">
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24" fill="#D97757"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentClaudeCode.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Claude Code</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24" fill="#10A37F"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073z"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentCodex.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Codex</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#4285F4"/><circle cx="12" cy="12" r="6" fill="#EA4335"/><circle cx="12" cy="12" r="3" fill="#FBBC05"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentGeminiCLI.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Gemini CLI</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24" fill="#24292F"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentCopilotCLI.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Copilot CLI</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="#5B8DEF"/><path d="M7 12h10M12 7v10" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentOpenCode.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">OpenCode</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#FF6B35"/><path d="M12 6v6l4 4" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentAntigravity.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Antigravity</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" fill="#1A1A1A"/><path d="M8 8h8M8 12h8M8 16h5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentCursor.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Cursor</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><path d="M12 2L2 8l10 6 10-6-10-6z" fill="#6366F1"/><path d="M2 16l10 6 10-6" fill="#6366F1" opacity="0.6"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentKiro.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Kiro</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#0EA5E9"/><path d="M8 10c0-1 .5-2 2-2s2 1 2 2-1 2-2 2" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M12 16v-2" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentCodeBuddy.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">CodeBuddy</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><path d="M12 2L4 6v12c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V6l-8-4z" fill="#F97316"/><path d="M12 6v8" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentOpenClaw.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">OpenClaw</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" fill="#000"/><path d="M8 12h8M12 8v8" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentTrae.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Trae</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" fill="#8B5CF6"/><path d="M21 21l-4.35-4.35" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentQoder.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">Qoder</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#06B6D4"/><text x="12" y="16" text-anchor="middle" fill="white" font-size="10" font-weight="bold">Q</text></svg></span>
+        <span class="agent-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="color:#00C78B"><circle cx="12" cy="12" r="9.25"/><path d="M9.3 16.8v-5.9a1.1 1.1 0 0 1 2.2 0v3.3"/><path d="M11.5 13.9V8.7a1.1 1.1 0 0 1 2.2 0v5.1"/><path d="M13.7 13.6V9.9a1.1 1.1 0 0 1 2.2 0v4.7c0 2.3-1.6 4-3.9 4-1.3 0-2.2-.6-2.9-1.8l-1.2-2a1.1 1.1 0 0 1 1.9-1.2l.8 1.3"/></svg></span>
         <span class="agent-name">QClaw</span>
       </li>
       <li>
-        <span class="agent-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="#E11D48"/><path d="M8 12h8M12 8v8" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+        <span class="agent-icon"><img src="agent-icons/AgentWorkBuddy.svg" alt="" aria-hidden="true" decoding="async"></span>
         <span class="agent-name">WorkBuddy</span>
       </li>
     </ol>

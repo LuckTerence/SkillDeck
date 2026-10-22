@@ -36,6 +36,7 @@
 - **Multi-Agent Support** — Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode, Antigravity, Cursor, Kiro, CodeBuddy, OpenClaw, Trae, Qoder
 - **Registry & Marketplace Browser** — Browse [skills.sh](https://skills.sh) leaderboard plus the ClawHub catalog for OpenClaw with search, sorting, and filters
 - **Unified Dashboard** — All skills in one three-pane macOS-native view
+- **Usage Insights** — Track invocation counts per skill across Codex, Claude Code, and Copilot CLI, then sort the dashboard by usage to spot and clean up skills you no longer use
 - **Flexible Imports** — Install from GitHub or import from a local folder, then auto-create symlinks and update the lock file
 - **Update Checker** — Detect remote changes and pull updates with one click
 - **SKILL.md Editor** — Split-pane form + markdown editor with live preview

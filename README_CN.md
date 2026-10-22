@@ -36,6 +36,7 @@
 - **多代理支持** — Claude Code、Codex、Gemini CLI、Copilot CLI、OpenCode、Antigravity、Cursor、Kiro、CodeBuddy、OpenClaw、Trae、Qoder
 - **技能市场浏览** — 浏览 [skills.sh](https://skills.sh) 排行榜，并针对 OpenClaw 浏览 ClawHub 市场，支持搜索、排序和筛选
 - **统一仪表盘** — 所有技能集中在一个 macOS 原生三栏视图中
+- **技能使用统计** — 统计每个技能在 Codex、Claude Code 和 Copilot CLI 中的调用次数，并支持按使用量排序，快速找出并清理长期不用的技能
 - **灵活导入** — 支持从 GitHub 安装或从本地文件夹导入，并自动创建符号链接、更新锁文件
 - **更新检测** — 检测远程更改，一键拉取更新
 - **SKILL.md 编辑器** — 分栏式表单 + Markdown 编辑器，支持实时预览
