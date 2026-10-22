@@ -62,6 +62,7 @@ final class DashboardViewModel {
         case name = "Name"
         case scope = "Scope"
         case agent = "Agent Count"
+        case usage = "Usage Count"
 
         /// Each sort order corresponds to an SF Symbol icon
         var iconName: String {
@@ -69,6 +70,15 @@ final class DashboardViewModel {
             case .name: return "textformat.abc"
             case .scope: return "scope"
             case .agent: return "cpu"
+            case .usage: return "chart.bar.xaxis"
+            }
+        }
+
+        /// Direction applied when the user switches to this field.
+        var defaultDirection: SortDirection {
+            switch self {
+            case .usage: return .descending
+            default: return .ascending
             }
         }
     }
@@ -78,6 +88,82 @@ final class DashboardViewModel {
 
     init(skillManager: SkillManager) {
         self.skillManager = skillManager
+    }
+
+    // MARK: - Usage Scope
+
+    /// Agents whose usage contributes to the current sort/badge.
+    /// Unsupported Agents are excluded: `skillUsageScanState` reports their missing
+    /// entry as `.notScanned`, which would otherwise make the list spin/freeze forever.
+    var relevantUsageAgents: [AgentType] {
+        let candidates = selectedAgentFilter.map { [$0] }
+            ?? skillManager.skillUsageSupportedAgents
+        return candidates.filter { skillManager.isSkillUsageSupported($0) }
+    }
+
+    var hasUnscannedRelevantUsage: Bool {
+        relevantUsageAgents.contains {
+            skillManager.skillUsageScanState(for: $0) == .notScanned
+        }
+    }
+
+    var isRelevantUsageScanning: Bool {
+        relevantUsageAgents.contains {
+            skillManager.skillUsageScanState(for: $0) == .scanning
+        }
+    }
+
+    /// True before or while the relevant scans finish; freezes ordering and shows a spinner.
+    var isRelevantUsagePending: Bool {
+        hasUnscannedRelevantUsage || isRelevantUsageScanning
+    }
+
+    /// Failed log count restricted to the current scope, used by `isPartial`.
+    var relevantUsageFailedLogCount: Int {
+        relevantUsageAgents.reduce(0) { total, agent in
+            switch skillManager.skillUsageScanState(for: agent) {
+            case .available(_, _, let failed), .failed(let failed):
+                return total + failed
+            default:
+                return total
+            }
+        }
+    }
+
+    /// Localization key for the unknown placeholder, also scoped to relevant Agents.
+    var unknownUsageHelpKey: String {
+        if isRelevantUsagePending { return L10nKeys.usageAgentScanning }
+        if relevantUsageFailedLogCount > 0 { return L10nKeys.usageAgentUnreadable }
+        return L10nKeys.usageAgentUnavailable
+    }
+
+    /// Aggregated usage for one skill, respecting the current Agent filter.
+    /// Returns nil when no relevant Agent has readable usage history.
+    func usageSummary(for skill: Skill) -> SkillUsageSummary? {
+        var agentCounts: [AgentType: Int] = [:]
+
+        for agent in relevantUsageAgents {
+            guard case .available = skillManager.skillUsageScanState(for: agent) else {
+                continue
+            }
+            agentCounts[agent] = skillManager.skillUsage(for: skill.id, agent: agent)?
+                .detectedInvocationCount ?? 0
+        }
+
+        guard !agentCounts.isEmpty else { return nil }
+
+        return SkillUsageSummary(
+            count: agentCounts.values.reduce(0, +),
+            agentCounts: agentCounts,
+            isPartial: isRelevantUsagePending || relevantUsageFailedLogCount > 0
+        )
+    }
+
+    private func isOrderedBeforeByName(_ lhs: Skill, _ rhs: Skill) -> Bool {
+        let lhsName = lhs.displayName.lowercased()
+        let rhsName = rhs.displayName.lowercased()
+        if lhsName != rhsName { return lhsName < rhsName }
+        return lhs.id < rhs.id
     }
 
     /// Calculates the list of skills to display based on current search, filter, and sort conditions
@@ -119,6 +205,35 @@ final class DashboardViewModel {
                 ascending
                     ? $0.installations.count < $1.installations.count
                     : $0.installations.count > $1.installations.count
+            }
+        case .usage:
+            // Freeze only while a relevant Agent is pending. Providers outside the current
+            // filter may still be scanning in the background without reshuffling this view.
+            guard !isRelevantUsagePending else {
+                result.sort(by: isOrderedBeforeByName)
+                break
+            }
+
+            // Precompute once: the comparator runs O(n log n) times.
+            let counts = Dictionary(
+                uniqueKeysWithValues: result.map { ($0.id, usageSummary(for: $0)?.count) }
+            )
+
+            result.sort { lhs, rhs in
+                switch (counts[lhs.id] ?? nil, counts[rhs.id] ?? nil) {
+                case let (lhsCount?, rhsCount?):
+                    if lhsCount != rhsCount {
+                        return ascending ? lhsCount < rhsCount : lhsCount > rhsCount
+                    }
+                case (nil, .some):
+                    // Unknown usage always sorts after known values, in both directions.
+                    return false
+                case (.some, nil):
+                    return true
+                case (nil, nil):
+                    break
+                }
+                return isOrderedBeforeByName(lhs, rhs)
             }
         }
 

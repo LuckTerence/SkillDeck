@@ -110,6 +110,37 @@ final class SkillManagerUsageTests: XCTestCase {
         XCTAssertEqual(forcedScanCount, firstScanCount + 1)
     }
 
+    /// Dashboard scans lazily and only for the Agents in its current scope. Providers outside
+    /// the requested set must stay untouched so filtering one Agent does not fan out to all.
+    @MainActor
+    func testLoadSkillUsageAgentTypesScansOnlySelectedProviders() async {
+        let codex = FakeSkillUsageProvider(
+            agentType: .codex,
+            result: SkillUsageScanResult(
+                records: [:], scannedLogCount: 1, preservedLogCount: 0, failedLogCount: 0
+            )
+        )
+        let claude = FakeSkillUsageProvider(
+            agentType: .claudeCode,
+            result: SkillUsageScanResult(
+                records: [:], scannedLogCount: 1, preservedLogCount: 0, failedLogCount: 0
+            )
+        )
+        let manager = SkillManager(skillUsageProviders: [codex, claude])
+
+        await manager.loadSkillUsage(agentTypes: [.codex])
+
+        let codexScanCount = await codex.scanCount
+        let claudeScanCount = await claude.scanCount
+        XCTAssertEqual(codexScanCount, 1)
+        XCTAssertEqual(claudeScanCount, 0)
+        XCTAssertEqual(
+            manager.skillUsageScanState(for: .codex),
+            .available(scannedLogCount: 1, preservedLogCount: 0, failedLogCount: 0)
+        )
+        XCTAssertEqual(manager.skillUsageScanState(for: .claudeCode), .notScanned)
+    }
+
     /// Preserved cache keeps old counts visible, but `preservedLogCount` records that they are
     /// stale; the manager must not downgrade this to `.failed` or hide the warning.
     @MainActor
