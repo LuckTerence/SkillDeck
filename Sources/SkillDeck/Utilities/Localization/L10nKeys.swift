@@ -80,6 +80,7 @@ enum L10nKeys {
     static let sidebarInstallFromLocalFolder = "sidebar.install.fromLocalFolder"
     static let sidebarHelpInstallSkill = "sidebar.help.installSkill"
     static let sidebarHelpCheckAllUpdates = "sidebar.help.checkAllUpdates"
+    static let sidebarHelpUpdateAllSkills = "sidebar.help.updateAllSkills"
     static let sidebarHelpRefreshSkills = "sidebar.help.refreshSkills"
 
     static let emptySelectSkillTitle = "empty.selectSkill.title"
@@ -168,6 +169,7 @@ enum L10nKeys {
         sidebarInstallFromLocalFolder,
         sidebarHelpInstallSkill,
         sidebarHelpCheckAllUpdates,
+        sidebarHelpUpdateAllSkills,
         sidebarHelpRefreshSkills,
         emptySelectSkillTitle,
         emptySelectSkillSubtitleList,

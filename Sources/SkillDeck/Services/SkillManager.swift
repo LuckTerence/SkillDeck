@@ -69,6 +69,27 @@ final class SkillManager {
         case installedSkillMarkdownOnly
     }
 
+    /// Error types for skill update operations
+    enum SkillUpdateError: Error, LocalizedError {
+        case batchUpdateInProgress
+        case invalidLockEntry
+
+        var errorDescription: String? {
+            switch self {
+            case .batchUpdateInProgress:
+                "Batch update is currently in progress. Please wait for it to complete."
+            case .invalidLockEntry:
+                "Invalid skill lock entry."
+            }
+        }
+    }
+
+    /// Manifest stored in `.skilldeck-manifest.json` inside temporary backup directories
+    struct BackupManifest: Codable {
+        let skillId: String
+        let canonicalPath: String
+    }
+
     // MARK: - Published State (UI-bound state)
 
     /// All discovered skills (deduplicated)
@@ -130,19 +151,28 @@ final class SkillManager {
     /// Error message during update process (displayed to user, retryable)
     var updateError: String?
 
+    /// F19: Whether batch update for all skills is currently running
+    var isUpdatingAllSkills = false
+
+    /// F19: Number of skills completed in current batch update
+    var batchUpdateCompleted: Int = 0
+
+    /// F19: Total number of skills to update in current batch update
+    var batchUpdateTotal: Int = 0
+
     // MARK: - Dependencies (dependent sub-services)
 
     private let scanner = SkillScanner()
     private let detector = AgentDetector()
-    private let lockFileManager = LockFileManager()
+    private let lockFileManager: LockFileManager
     private let watcher = FileSystemWatcher()
     /// Application self-update checker (GitHub Release check, download, install)
     private let updateChecker = UpdateChecker()
     /// F10/F12: Git operations service for installation and update checking
-    private let gitService = GitService()
+    private let gitService: any GitServiceProtocol
     /// F12: SkillDeck private commit hash cache, independent of .skill-lock.json
     /// Stored in ~/.agents/.skilldeck-cache.json, doesn't pollute npx skills' lock file format
-    private let commitHashCache = CommitHashCache()
+    private let commitHashCache: CommitHashCache
 
     /// Agent-specific adapters for reconstructing historical skill invocations.
     private let skillUsageProviders: [AgentType: any SkillUsageProvider]
@@ -165,12 +195,19 @@ final class SkillManager {
     // MARK: - Initialization
 
     init(
+        gitService: any GitServiceProtocol = GitService(),
+        lockFileManager: LockFileManager = LockFileManager(),
+        commitHashCache: CommitHashCache = CommitHashCache(),
         skillUsageProviders: [any SkillUsageProvider] = SkillUsageProviderFactory.makeDefaultProviders()
     ) {
+        self.gitService = gitService
+        self.lockFileManager = lockFileManager
+        self.commitHashCache = commitHashCache
         self.skillUsageProviders = Dictionary(
             skillUsageProviders.map { ($0.agentType, $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        Self.recoverAllOrphanBackups()
         setupFileWatcher()
     }
 
@@ -794,6 +831,7 @@ final class SkillManager {
     /// Smart clone depth: check if any skill in the group lacks commit hash (from cache),
     /// if so use full clone (need to search git history for backfill), otherwise use shallow clone (faster).
     func checkAllUpdates() async {
+        guard !isUpdatingAllSkills && !isCheckingUpdates else { return }
         isCheckingUpdates = true
         defer { isCheckingUpdates = false }
 
@@ -898,29 +936,28 @@ final class SkillManager {
         }
     }
 
-    /// Execute update: overwrite local with remote files, update lock entry
+    /// Core update operation for a single skill given an already-cloned repository directory.
+    ///
+    /// Performs same-volume atomic replacement with backup and rollback.
+    /// Root-level skills have their `.git` folder removed to prevent repository pollution.
     ///
     /// - Parameters:
-    ///   - skill: Skill to update
-    ///   - remoteHash: Remote latest tree hash
-    func updateSkill(_ skill: Skill, remoteHash: String) async throws {
-        guard let lockEntry = skill.lockEntry else { return }
-        guard lockEntry.sourceType == "github" else { return }
-
-        // Derive folderPath from skillPath stored in lock file
+    ///   - skill: The skill to update
+    ///   - repoDir: The local directory of the cloned repository
+    ///   - remoteHash: The remote tree hash to record in the lockfile
+    ///   - newCommitHash: The commit hash of the repo HEAD to record in the cache
+    private func applySkillUpdate(
+        skill: Skill,
+        repoDir: URL,
+        remoteHash: String,
+        newCommitHash: String
+    ) async throws {
+        guard let lockEntry = skill.lockEntry else {
+            throw SkillUpdateError.invalidLockEntry
+        }
         let folderPath = Self.deriveFolderPath(from: lockEntry.skillPath)
 
-        // 1. Clone source repository
-        let repoDir = try await gitService.shallowClone(repoURL: lockEntry.sourceUrl)
-
-        // 2. Get new commit hash and write to cache
-        let newCommitHash = try await gitService.getCommitHash(in: repoDir)
-        await commitHashCache.setHash(for: skill.id, hash: newCommitHash)
-        try? await commitHashCache.save()
-
-        // 3. Copy files to overwrite canonical directory
         let fm = FileManager.default
-        // Handle root-level skills (folderPath is empty)
         let sourceDir: URL
         if folderPath.isEmpty {
             sourceDir = repoDir
@@ -928,30 +965,257 @@ final class SkillManager {
             sourceDir = repoDir.appendingPathComponent(folderPath)
         }
         let canonicalDir = skill.canonicalURL
+        let parentDir = canonicalDir.deletingLastPathComponent()
+        let backupURL = parentDir.appendingPathComponent(".skilldeck-tmp-\(skill.id)-\(UUID().uuidString)")
 
-        // Delete old files then copy new files
+        // 1. Move old files to same-volume hidden backup and write manifest
+        var didBackup = false
         if fm.fileExists(atPath: canonicalDir.path) {
-            try fm.removeItem(at: canonicalDir)
+            try fm.moveItem(at: canonicalDir, to: backupURL)
+            didBackup = true
+
+            do {
+                let manifest = BackupManifest(skillId: skill.id, canonicalPath: canonicalDir.path)
+                let data = try JSONEncoder().encode(manifest)
+                try data.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
+            } catch {
+                // If writing manifest fails, immediately rollback to canonicalDir and rethrow
+                try? fm.removeItem(at: canonicalDir)
+                try? fm.moveItem(at: backupURL, to: canonicalDir)
+                throw error
+            }
         }
-        try fm.copyItem(at: sourceDir, to: canonicalDir)
 
-        // 4. Update lock entry (new hash + new updatedAt)
-        let now = ISO8601DateFormatter().string(from: Date())
-        var updatedEntry = lockEntry
-        updatedEntry.skillFolderHash = remoteHash
-        updatedEntry.updatedAt = now
-        try await lockFileManager.updateEntry(skillName: skill.id, entry: updatedEntry)
+        // 2. Copy new files and update lock entry with rollback guard
+        do {
+            try fm.copyItem(at: sourceDir, to: canonicalDir)
 
-        // 5. Clean up temporary directory
+            // If root-level skill, strip .git directory from canonicalDir to prevent pollution.
+            // Non-fatal if removal fails (e.g. file lock) — don't abort an otherwise successful update.
+            if folderPath.isEmpty {
+                let destGitDir = canonicalDir.appendingPathComponent(".git")
+                if fm.fileExists(atPath: destGitDir.path) {
+                    try? fm.removeItem(at: destGitDir)
+                }
+            }
+
+            // Update lock entry (new hash + new updatedAt)
+            let now = ISO8601DateFormatter().string(from: Date())
+            var updatedEntry = lockEntry
+            updatedEntry.skillFolderHash = remoteHash
+            updatedEntry.updatedAt = now
+            try await lockFileManager.updateEntry(skillName: skill.id, entry: updatedEntry)
+
+            // CommitHashCache update ONLY after file copy and lock entry update succeed!
+            await commitHashCache.setHash(for: skill.id, hash: newCommitHash)
+
+            // Clean up backup directory
+            if didBackup {
+                try? fm.removeItem(at: backupURL)
+            }
+        } catch {
+            // Full rollback on failure
+            if didBackup {
+                try? fm.removeItem(at: canonicalDir)
+                let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
+                try? fm.removeItem(at: manifestURL)
+                try? fm.moveItem(at: backupURL, to: canonicalDir)
+            } else {
+                // If original directory did not exist, clean up partial copied files unconditionally
+                try? fm.removeItem(at: canonicalDir)
+            }
+            throw error
+        }
+    }
+
+    /// Execute update: overwrite local with remote files, update lock entry
+    ///
+    /// - Parameters:
+    ///   - skill: Skill to update
+    ///   - remoteHash: Remote latest tree hash
+    func updateSkill(_ skill: Skill, remoteHash: String) async throws {
+        guard !isUpdatingAllSkills else {
+            throw SkillUpdateError.batchUpdateInProgress
+        }
+        guard let lockEntry = skill.lockEntry else { return }
+        guard lockEntry.sourceType == "github" else { return }
+
+        // 1. Clone source repository
+        let repoDir = try await gitService.shallowClone(repoURL: lockEntry.sourceUrl)
+        var clonedRepoDir: URL? = repoDir
+        defer {
+            if let dir = clonedRepoDir {
+                Task { await gitService.cleanupTempDirectory(dir) }
+            }
+        }
+
+        // 2. Get new commit hash
+        let newCommitHash = try await gitService.getCommitHash(in: repoDir)
+
+        // 3. Apply update (backup, copy, strip .git, update lockfile, update cache)
+        try await applySkillUpdate(
+            skill: skill,
+            repoDir: repoDir,
+            remoteHash: remoteHash,
+            newCommitHash: newCommitHash
+        )
+        try? await commitHashCache.save()
+
+        // 4. Clean up cloned repo directory immediately
+        clonedRepoDir = nil
         await gitService.cleanupTempDirectory(repoDir)
 
-        // 6. Clear update status and cached remote hashes (no longer needed after update)
-        updateStatuses[skill.id] = .notChecked
+        // 5. Update status and clear cached hashes
+        updateStatuses[skill.id] = .upToDate
         cachedRemoteTreeHashes.removeValue(forKey: skill.id)
         cachedRemoteCommitHashes.removeValue(forKey: skill.id)
 
-        // 7. Refresh UI
+        // 6. Refresh UI
         await refresh()
+    }
+
+    /// Batch update all skills that have available updates
+    ///
+    /// If no skills have been checked yet or none currently show updates,
+    /// this automatically triggers `checkAllUpdates()` first.
+    ///
+    /// Groups skills by `sourceUrl` and shallow-clones each unique repository only once.
+    func updateAllSkills() async {
+        guard !isUpdatingAllSkills && !isCheckingUpdates else { return }
+
+        // 1. Check if any skills have pending updates; if not, run checkAllUpdates() first.
+        // NOTE: isUpdatingAllSkills is kept false here so checkAllUpdates() can run without being blocked.
+        var skillsToUpdate = skills.filter { skill in
+            guard let sourceType = skill.lockEntry?.sourceType, sourceType == "github" else { return false }
+            return updateStatuses[skill.id] == .hasUpdate || skill.hasUpdate
+        }
+
+        if skillsToUpdate.isEmpty {
+            await checkAllUpdates()
+            skillsToUpdate = skills.filter { skill in
+                guard let sourceType = skill.lockEntry?.sourceType, sourceType == "github" else { return false }
+                return updateStatuses[skill.id] == .hasUpdate || skill.hasUpdate
+            }
+        }
+
+        guard !skillsToUpdate.isEmpty else { return }
+
+        // 2. Acquire update lock
+        guard !isUpdatingAllSkills && !isCheckingUpdates else { return }
+        isUpdatingAllSkills = true
+        defer {
+            isUpdatingAllSkills = false
+            batchUpdateCompleted = 0
+            batchUpdateTotal = 0
+        }
+
+        batchUpdateTotal = skillsToUpdate.count
+        batchUpdateCompleted = 0
+
+        // 3. Group by sourceUrl to clone each repo only once
+        let grouped = Dictionary(grouping: skillsToUpdate) { $0.lockEntry!.sourceUrl }
+
+        for (sourceUrl, groupSkills) in grouped {
+            var clonedRepoDir: URL?
+            var processedInGroup = 0
+            do {
+                let repoDir = try await gitService.shallowClone(repoURL: sourceUrl)
+                clonedRepoDir = repoDir
+                let newCommitHash = try await gitService.getCommitHash(in: repoDir)
+
+                for skill in groupSkills {
+                    guard let lockEntry = skill.lockEntry else {
+                        processedInGroup += 1
+                        batchUpdateCompleted += 1
+                        continue
+                    }
+                    let folderPath = Self.deriveFolderPath(from: lockEntry.skillPath)
+
+                    let remoteHash: String
+                    if let cached = cachedRemoteTreeHashes[skill.id] {
+                        remoteHash = cached
+                    } else if let rth = skill.remoteTreeHash {
+                        remoteHash = rth
+                    } else {
+                        remoteHash = try await gitService.getTreeHash(for: folderPath, in: repoDir)
+                    }
+
+                    do {
+                        try await applySkillUpdate(
+                            skill: skill,
+                            repoDir: repoDir,
+                            remoteHash: remoteHash,
+                            newCommitHash: newCommitHash
+                        )
+                        updateStatuses[skill.id] = .upToDate
+                        cachedRemoteTreeHashes.removeValue(forKey: skill.id)
+                        cachedRemoteCommitHashes.removeValue(forKey: skill.id)
+                    } catch {
+                        updateStatuses[skill.id] = .error(error.localizedDescription)
+                    }
+
+                    processedInGroup += 1
+                    batchUpdateCompleted += 1
+                }
+            } catch {
+                let remaining = groupSkills.dropFirst(processedInGroup)
+                for skill in remaining {
+                    updateStatuses[skill.id] = .error(error.localizedDescription)
+                    batchUpdateCompleted += 1
+                }
+            }
+
+            if let dir = clonedRepoDir {
+                await gitService.cleanupTempDirectory(dir)
+            }
+        }
+
+        // Save commit hash cache once after all batch updates complete
+        try? await commitHashCache.save()
+
+        // Refresh UI state
+        await refresh()
+    }
+
+    /// Scan all agent skill directories and the global shared directory for leftover `.skilldeck-tmp-*` backups.
+    static func recoverAllOrphanBackups() {
+        var directoriesToScan: [URL] = [SkillScanner.sharedSkillsURL]
+        for agent in AgentType.allCases {
+            directoriesToScan.append(agent.skillsDirectoryURL)
+        }
+        let uniqueDirs = Array(Set(directoriesToScan))
+        for dir in uniqueDirs {
+            recoverOrphanBackups(in: dir)
+        }
+    }
+
+    /// Scan a single directory for leftover `.skilldeck-tmp-*` backup directories and recover or clean up.
+    static func recoverOrphanBackups(in directory: URL = SkillScanner.sharedSkillsURL) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
+        for item in items where item.hasPrefix(".skilldeck-tmp-") {
+            let backupURL = directory.appendingPathComponent(item)
+            let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
+
+            if let data = try? Data(contentsOf: manifestURL),
+               let manifest = try? JSONDecoder().decode(BackupManifest.self, from: data) {
+                let canonicalURL = URL(fileURLWithPath: manifest.canonicalPath)
+                // Boundary check: ensure canonical path resides in the directory being scanned
+                guard canonicalURL.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
+                    continue
+                }
+                if !fm.fileExists(atPath: canonicalURL.path) {
+                    try? fm.removeItem(at: manifestURL)
+                    try? fm.moveItem(at: backupURL, to: canonicalURL)
+                } else {
+                    try? fm.removeItem(at: backupURL)
+                }
+            } else {
+                // Missing manifest or corrupted: conservatively preserve to prevent data loss.
+                // Do NOT delete, as this might be the only surviving copy of user skill files.
+                continue
+            }
+        }
     }
 
     // MARK: - Helper Methods
