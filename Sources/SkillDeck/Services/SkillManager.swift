@@ -70,14 +70,17 @@ final class SkillManager {
     }
 
     /// Error types for skill update operations
-    enum SkillUpdateError: Error, LocalizedError {
+    enum SkillUpdateError: Error, LocalizedError, Equatable {
         case batchUpdateInProgress
+        case individualUpdateInProgress
         case invalidLockEntry
 
         var errorDescription: String? {
             switch self {
             case .batchUpdateInProgress:
                 "Batch update is currently in progress. Please wait for it to complete."
+            case .individualUpdateInProgress:
+                "An update is already in progress for this skill."
             case .invalidLockEntry:
                 "Invalid skill lock entry."
             }
@@ -163,6 +166,9 @@ final class SkillManager {
 
     /// F19: Whether batch update for all skills is currently running
     var isUpdatingAllSkills = false
+
+    /// F19: In-flight individual skill update IDs, ensuring mutual exclusion with batch updates
+    var updatingSkillIDs: Set<String> = []
 
     /// F19: Number of skills completed in current batch update
     var batchUpdateCompleted: Int = 0
@@ -1077,7 +1083,7 @@ final class SkillManager {
 
     /// Core update operation for a single skill given an already-cloned repository directory.
     ///
-    /// Performs same-volume atomic replacement with backup and rollback.
+    /// Stages files to a temporary directory before atomic swap, preventing partial directory states.
     /// Root-level skills have their `.git` folder removed to prevent repository pollution.
     ///
     /// - Parameters:
@@ -1105,63 +1111,72 @@ final class SkillManager {
         }
         let canonicalDir = skill.canonicalURL
         let parentDir = canonicalDir.deletingLastPathComponent()
-        let backupURL = parentDir.appendingPathComponent(".skilldeck-tmp-\(skill.id)-\(UUID().uuidString)")
+        let uuid = UUID().uuidString
+        let stagingURL = parentDir.appendingPathComponent(".skilldeck-stage-\(skill.id)-\(uuid)")
+        let backupURL = parentDir.appendingPathComponent(".skilldeck-tmp-\(skill.id)-\(uuid)")
 
-        // 1. Move old files to same-volume hidden backup and write manifest
         var didBackup = false
-        if fm.fileExists(atPath: canonicalDir.path) {
-            try fm.moveItem(at: canonicalDir, to: backupURL)
-            didBackup = true
+        var didSwap = false
 
-            do {
-                let manifest = BackupManifest(skillId: skill.id, canonicalPath: canonicalDir.path)
-                let data = try JSONEncoder().encode(manifest)
-                try data.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
-            } catch {
-                // If writing manifest fails, immediately rollback to canonicalDir and rethrow
-                try? fm.removeItem(at: canonicalDir)
-                try? fm.moveItem(at: backupURL, to: canonicalDir)
-                throw error
+        defer {
+            if fm.fileExists(atPath: stagingURL.path) {
+                try? fm.removeItem(at: stagingURL)
             }
         }
 
-        // 2. Copy new files and update lock entry with rollback guard
         do {
-            try fm.copyItem(at: sourceDir, to: canonicalDir)
+            // 1. Stage new files into a temporary directory on the same volume first.
+            // If copying fails or is interrupted, canonicalDir remains completely untouched.
+            try fm.copyItem(at: sourceDir, to: stagingURL)
 
-            // If root-level skill, strip .git directory from canonicalDir to prevent pollution.
-            // Non-fatal if removal fails (e.g. file lock) — don't abort an otherwise successful update.
+            // If root-level skill, strip .git directory from stagingURL to prevent pollution.
             if folderPath.isEmpty {
-                let destGitDir = canonicalDir.appendingPathComponent(".git")
+                let destGitDir = stagingURL.appendingPathComponent(".git")
                 if fm.fileExists(atPath: destGitDir.path) {
                     try? fm.removeItem(at: destGitDir)
                 }
             }
 
-            // Update lock entry (new hash + new updatedAt)
+            // 2. Move existing canonical directory to same-volume hidden backup and write manifest
+            if fm.fileExists(atPath: canonicalDir.path) {
+                try fm.moveItem(at: canonicalDir, to: backupURL)
+                didBackup = true
+                Self.registerActiveBackup(backupURL.path)
+
+                let manifest = BackupManifest(skillId: skill.id, canonicalPath: canonicalDir.path)
+                let data = try JSONEncoder().encode(manifest)
+                try data.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
+            }
+
+            // 3. Atomically swap staged files to canonical location
+            try fm.moveItem(at: stagingURL, to: canonicalDir)
+            didSwap = true
+
+            // 4. Update lock entry (new hash + new updatedAt)
             let now = ISO8601DateFormatter().string(from: Date())
             var updatedEntry = lockEntry
             updatedEntry.skillFolderHash = remoteHash
             updatedEntry.updatedAt = now
             try await lockFileManager.updateEntry(skillName: skill.id, entry: updatedEntry)
 
-            // CommitHashCache update ONLY after file copy and lock entry update succeed!
+            // 5. CommitHashCache update ONLY after file swap and lock entry update succeed!
             await commitHashCache.setHash(for: skill.id, hash: newCommitHash)
 
-            // Clean up backup directory
+            // 6. Clean up backup directory and unregister
             if didBackup {
+                Self.unregisterActiveBackup(backupURL.path)
                 try? fm.removeItem(at: backupURL)
             }
         } catch {
             // Full rollback on failure
-            if didBackup {
+            if didSwap {
                 try? fm.removeItem(at: canonicalDir)
+            }
+            if didBackup {
                 let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
                 try? fm.removeItem(at: manifestURL)
                 try? fm.moveItem(at: backupURL, to: canonicalDir)
-            } else {
-                // If original directory did not exist, clean up partial copied files unconditionally
-                try? fm.removeItem(at: canonicalDir)
+                Self.unregisterActiveBackup(backupURL.path)
             }
             throw error
         }
@@ -1171,13 +1186,19 @@ final class SkillManager {
     ///
     /// - Parameters:
     ///   - skill: Skill to update
-    ///   - remoteHash: Remote latest tree hash
-    func updateSkill(_ skill: Skill, remoteHash: String) async throws {
+    ///   - remoteHash: Optional remote tree hash (retained for call-site compatibility; resolved directly from repoDir to prevent hash drift)
+    func updateSkill(_ skill: Skill, remoteHash: String? = nil) async throws {
         guard !isUpdatingAllSkills else {
             throw SkillUpdateError.batchUpdateInProgress
         }
+        guard !updatingSkillIDs.contains(skill.id) else {
+            throw SkillUpdateError.individualUpdateInProgress
+        }
         guard let lockEntry = skill.lockEntry else { return }
         guard lockEntry.sourceType == "github" else { return }
+
+        updatingSkillIDs.insert(skill.id)
+        defer { updatingSkillIDs.remove(skill.id) }
 
         // 1. Clone source repository
         let repoDir = try await gitService.shallowClone(repoURL: lockEntry.sourceUrl)
@@ -1188,14 +1209,16 @@ final class SkillManager {
             }
         }
 
-        // 2. Get new commit hash
+        // 2. Get new commit hash and resolve tree hash directly from cloned repoDir
         let newCommitHash = try await gitService.getCommitHash(in: repoDir)
+        let folderPath = Self.deriveFolderPath(from: lockEntry.skillPath)
+        let resolvedTreeHash = try await gitService.getTreeHash(for: folderPath, in: repoDir)
 
-        // 3. Apply update (backup, copy, strip .git, update lockfile, update cache)
+        // 3. Apply update (staging, backup, swap, update lockfile, update cache)
         try await applySkillUpdate(
             skill: skill,
             repoDir: repoDir,
-            remoteHash: remoteHash,
+            remoteHash: resolvedTreeHash,
             newCommitHash: newCommitHash
         )
         try? await commitHashCache.save()
@@ -1220,7 +1243,7 @@ final class SkillManager {
     ///
     /// Groups skills by `sourceUrl` and shallow-clones each unique repository only once.
     func updateAllSkills() async {
-        guard !isUpdatingAllSkills && !isCheckingUpdates else { return }
+        guard !isUpdatingAllSkills && !isCheckingUpdates && updatingSkillIDs.isEmpty else { return }
 
         // 1. Check if any skills have pending updates; if not, run checkAllUpdates() first.
         // NOTE: isUpdatingAllSkills is kept false here so checkAllUpdates() can run without being blocked.
@@ -1240,7 +1263,7 @@ final class SkillManager {
         guard !skillsToUpdate.isEmpty else { return }
 
         // 2. Acquire update lock
-        guard !isUpdatingAllSkills && !isCheckingUpdates else { return }
+        guard !isUpdatingAllSkills && !isCheckingUpdates && updatingSkillIDs.isEmpty else { return }
         isUpdatingAllSkills = true
         defer {
             isUpdatingAllSkills = false
@@ -1270,16 +1293,9 @@ final class SkillManager {
                     }
                     let folderPath = Self.deriveFolderPath(from: lockEntry.skillPath)
 
-                    let remoteHash: String
-                    if let cached = cachedRemoteTreeHashes[skill.id] {
-                        remoteHash = cached
-                    } else if let rth = skill.remoteTreeHash {
-                        remoteHash = rth
-                    } else {
-                        remoteHash = try await gitService.getTreeHash(for: folderPath, in: repoDir)
-                    }
-
                     do {
+                        // Resolve remote tree hash directly from the cloned repoDir for this update
+                        let remoteHash = try await gitService.getTreeHash(for: folderPath, in: repoDir)
                         try await applySkillUpdate(
                             skill: skill,
                             repoDir: repoDir,
@@ -1316,23 +1332,73 @@ final class SkillManager {
         await refresh()
     }
 
-    /// Scan all agent skill directories and the global shared directory for leftover `.skilldeck-tmp-*` backups.
-    static func recoverAllOrphanBackups() {
-        var directoriesToScan: [URL] = [SkillScanner.sharedSkillsURL]
-        for agent in AgentType.allCases {
-            directoriesToScan.append(agent.skillsDirectoryURL)
-        }
-        let uniqueDirs = Array(Set(directoriesToScan))
-        for dir in uniqueDirs {
+    private static let activeBackupsKey = "SkillDeck.ActiveBackupPaths"
+
+    static func registerActiveBackup(_ path: String, userDefaults: UserDefaults = .standard) {
+        var paths = userDefaults.stringArray(forKey: activeBackupsKey) ?? []
+        paths.append(path)
+        userDefaults.set(paths, forKey: activeBackupsKey)
+    }
+
+    static func unregisterActiveBackup(_ path: String, userDefaults: UserDefaults = .standard) {
+        var paths = userDefaults.stringArray(forKey: activeBackupsKey) ?? []
+        paths.removeAll { $0 == path }
+        userDefaults.set(paths, forKey: activeBackupsKey)
+    }
+
+    /// Scan all agent skill directories, the global shared directory, and any tracked active backup locations.
+    /// Only successfully scanned external paths are removed from UserDefaults, preserving unreachable
+    /// external volume paths (e.g. unmounted disks) for future recovery.
+    static func recoverAllOrphanBackups(
+        directoriesToScan: [URL]? = nil,
+        userDefaults: UserDefaults = .standard
+    ) {
+        let baseDirs: [URL] = directoriesToScan ?? {
+            var dirs: [URL] = [SkillScanner.sharedSkillsURL]
+            for agent in AgentType.allCases {
+                dirs.append(agent.skillsDirectoryURL)
+            }
+            return dirs
+        }()
+
+        for dir in Array(Set(baseDirs)) {
             recoverOrphanBackups(in: dir)
+        }
+
+        if let tracked = userDefaults.stringArray(forKey: activeBackupsKey), !tracked.isEmpty {
+            var remainingPaths: [String] = []
+            for path in tracked {
+                let backupURL = URL(fileURLWithPath: path)
+                let parentDir = backupURL.deletingLastPathComponent()
+                if recoverOrphanBackups(in: parentDir) {
+                    // Successfully accessed and scanned parent directory; orphan backup handled
+                } else {
+                    // Parent directory was unreachable (e.g. disk disconnected); preserve entry
+                    remainingPaths.append(path)
+                }
+            }
+            if remainingPaths.isEmpty {
+                userDefaults.removeObject(forKey: activeBackupsKey)
+            } else {
+                userDefaults.set(remainingPaths, forKey: activeBackupsKey)
+            }
         }
     }
 
     /// Scan a single directory for leftover `.skilldeck-tmp-*` backup directories and recover or clean up.
-    static func recoverOrphanBackups(in directory: URL = SkillScanner.sharedSkillsURL) {
+    /// Returns true if directory was accessed and scanned, false if unreachable.
+    @discardableResult
+    static func recoverOrphanBackups(in directory: URL = SkillScanner.sharedSkillsURL) -> Bool {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
-        for item in items where item.hasPrefix(".skilldeck-tmp-") {
+        guard let items = try? fm.contentsOfDirectory(atPath: directory.path) else { return false }
+        for item in items {
+            // Clean up any abandoned staging directories
+            if item.hasPrefix(".skilldeck-stage-") {
+                let stageURL = directory.appendingPathComponent(item)
+                try? fm.removeItem(at: stageURL)
+                continue
+            }
+            guard item.hasPrefix(".skilldeck-tmp-") else { continue }
             let backupURL = directory.appendingPathComponent(item)
             let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
 
@@ -1340,7 +1406,7 @@ final class SkillManager {
                let manifest = try? JSONDecoder().decode(BackupManifest.self, from: data) {
                 let canonicalURL = URL(fileURLWithPath: manifest.canonicalPath)
                 // Boundary check: ensure canonical path resides in the directory being scanned
-                guard canonicalURL.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
+                guard canonicalURL.deletingLastPathComponent().resolvingSymlinksInPath().path == directory.resolvingSymlinksInPath().path else {
                     continue
                 }
                 if !fm.fileExists(atPath: canonicalURL.path) {
@@ -1355,6 +1421,7 @@ final class SkillManager {
                 continue
             }
         }
+        return true
     }
 
     // MARK: - Helper Methods

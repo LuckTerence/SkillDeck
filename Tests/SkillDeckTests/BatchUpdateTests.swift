@@ -21,7 +21,10 @@ actor MockGitService: GitServiceProtocol {
     func cloneRepo(repoURL: String, shallow: Bool) async throws -> URL {
         cloneCalls.append(repoURL)
         if let custom = customRepoDirs[repoURL] {
-            return custom
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MockGit-Clone-\(UUID().uuidString)")
+            try FileManager.default.copyItem(at: custom, to: tempDir)
+            return tempDir
         }
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("MockGit-\(UUID().uuidString)")
@@ -66,6 +69,16 @@ final class BatchUpdateTests: XCTestCase {
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("SkillDeckBatchTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let lockURL = tempDir.appendingPathComponent(".test-skill-lock.json")
+        let emptyLockFile = LockFile(
+            version: 3,
+            skills: [:],
+            dismissed: [:],
+            lastSelectedAgents: []
+        )
+        let data = try JSONEncoder().encode(emptyLockFile)
+        try data.write(to: lockURL)
     }
 
     override func tearDown() async throws {
@@ -112,6 +125,16 @@ final class BatchUpdateTests: XCTestCase {
             updatedAt: "2026-01-01T00:00:00Z"
         )
 
+        let lockURL = tempDir.appendingPathComponent(".test-skill-lock.json")
+        if FileManager.default.fileExists(atPath: lockURL.path),
+           let data = try? Data(contentsOf: lockURL),
+           var lockFile = try? JSONDecoder().decode(LockFile.self, from: data) {
+            lockFile.skills[id] = lockEntry
+            if let updatedData = try? JSONEncoder().encode(lockFile) {
+                try? updatedData.write(to: lockURL)
+            }
+        }
+
         var skill = Skill(
             id: id,
             canonicalURL: skillDir,
@@ -146,6 +169,50 @@ final class BatchUpdateTests: XCTestCase {
         await manager.checkAllUpdates()
 
         XCTAssertFalse(manager.isCheckingUpdates, "checkAllUpdates should return immediately if batch update is already running")
+    }
+
+    func testReentrancy_updateAllSkillsGuardsAgainstInFlightIndividualUpdate() async throws {
+        let mockGit = MockGitService()
+        let manager = makeIsolatedSkillManager(gitService: mockGit)
+
+        manager.updatingSkillIDs.insert("some-skill")
+        await manager.updateAllSkills()
+
+        XCTAssertFalse(manager.isUpdatingAllSkills, "updateAllSkills should return immediately if an individual update is running")
+    }
+
+    func testReentrancy_updateSkillGuardsAgainstConcurrentBatchUpdate() async throws {
+        let mockGit = MockGitService()
+        let manager = makeIsolatedSkillManager(gitService: mockGit)
+        let skill = try createTestSkill(id: "test-skill", repoURL: "https://example.com/repo.git", folderPath: "")
+
+        manager.isUpdatingAllSkills = true
+
+        do {
+            try await manager.updateSkill(skill, remoteHash: "new-hash")
+            XCTFail("updateSkill should throw batchUpdateInProgress when batch update is active")
+        } catch let error as SkillManager.SkillUpdateError {
+            XCTAssertEqual(error, .batchUpdateInProgress)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testReentrancy_updateSkillGuardsAgainstConcurrentIndividualUpdate() async throws {
+        let mockGit = MockGitService()
+        let manager = makeIsolatedSkillManager(gitService: mockGit)
+        let skill = try createTestSkill(id: "test-skill", repoURL: "https://example.com/repo.git", folderPath: "")
+
+        manager.updatingSkillIDs.insert("test-skill")
+
+        do {
+            try await manager.updateSkill(skill, remoteHash: "new-hash")
+            XCTFail("updateSkill should throw individualUpdateInProgress when same skill is already updating")
+        } catch let error as SkillManager.SkillUpdateError {
+            XCTAssertEqual(error, .individualUpdateInProgress)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     /// Verifies the critical path: when updateAllSkills is called without prior check,
@@ -311,5 +378,65 @@ final class BatchUpdateTests: XCTestCase {
 
         let canonicalGitDir = rootSkill.canonicalURL.appendingPathComponent(".git")
         XCTAssertFalse(FileManager.default.fileExists(atPath: canonicalGitDir.path), "Canonical directory for root-level skill must not contain .git folder")
+    }
+
+    func testOrphanRecovery_cleansUpAbandonedStagingDirectory() throws {
+        let testDir = tempDir.appendingPathComponent("stage-cleanup-test")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+
+        let stagingDir = testDir.appendingPathComponent(".skilldeck-stage-abandoned-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        try "abandoned content".write(to: stagingDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
+        SkillManager.recoverOrphanBackups(in: testDir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingDir.path), "Abandoned staging directory should be removed during orphan recovery")
+    }
+
+    func testOrphanRecovery_externalCanonicalLocationRecovered() throws {
+        let suiteName = "SkillDeckTests-\(UUID().uuidString)"
+        guard let testDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to initialize test UserDefaults suite")
+            return
+        }
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        let externalDir = tempDir.appendingPathComponent("external-dir")
+        try FileManager.default.createDirectory(at: externalDir, withIntermediateDirectories: true)
+
+        let skillId = "ext-skill"
+        let uuid = UUID().uuidString
+        let orphanBackupDir = externalDir.appendingPathComponent(".skilldeck-tmp-\(skillId)-\(uuid)")
+        try FileManager.default.createDirectory(at: orphanBackupDir, withIntermediateDirectories: true)
+        try "external content".write(to: orphanBackupDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
+        let canonicalDir = externalDir.appendingPathComponent(skillId)
+        let manifest = SkillManager.BackupManifest(skillId: skillId, canonicalPath: canonicalDir.path)
+        let manifestData = try JSONEncoder().encode(manifest)
+        try manifestData.write(to: orphanBackupDir.appendingPathComponent(".skilldeck-manifest.json"))
+
+        SkillManager.registerActiveBackup(orphanBackupDir.path, userDefaults: testDefaults)
+        SkillManager.recoverAllOrphanBackups(directoriesToScan: [], userDefaults: testDefaults)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalDir.path), "External canonical directory should be recovered via active backup registration")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanBackupDir.path))
+    }
+
+    func testOrphanRecovery_preservesUnreachableExternalBackupPath() throws {
+        let suiteName = "SkillDeckTests-Unreachable-\(UUID().uuidString)"
+        guard let testDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to initialize test UserDefaults suite")
+            return
+        }
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        let nonexistentDir = tempDir.appendingPathComponent("unmounted-disk-\(UUID().uuidString)")
+        let nonexistentBackup = nonexistentDir.appendingPathComponent(".skilldeck-tmp-skill-123")
+
+        SkillManager.registerActiveBackup(nonexistentBackup.path, userDefaults: testDefaults)
+        SkillManager.recoverAllOrphanBackups(directoriesToScan: [], userDefaults: testDefaults)
+
+        let remaining = testDefaults.stringArray(forKey: "SkillDeck.ActiveBackupPaths")
+        XCTAssertEqual(remaining, [nonexistentBackup.path], "Unreachable external backup path should be retained in UserDefaults for future recovery")
     }
 }
