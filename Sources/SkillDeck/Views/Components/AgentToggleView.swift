@@ -151,6 +151,29 @@ private struct AgentToggleRow: View {
                 .appFont(.caption)
                 .foregroundStyle(.orange)
 
+            case .stale:
+                // The latest refresh could not read history, but the manager kept the previous
+                // snapshot. Show the count with a dedicated stale tooltip rather than hiding it.
+                if let record = skillManager.skillUsage(for: skillID, agent: agentType) {
+                    HStack(spacing: 4) {
+                        Text(String(
+                            format: localized(L10nKeys.usageAgentUsesFormat),
+                            record.detectedInvocationCount
+                        ))
+                        .appFont(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(lastUsedHelp(record))
+
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .help(localized(L10nKeys.usageStaleHelp))
+                    }
+                } else {
+                    LText(key: L10nKeys.usageAgentUnreadable)
+                        .appFont(.caption)
+                        .foregroundStyle(.orange)
+                }
+
             case .unavailable:
                 LText(key: L10nKeys.usageAgentUnavailable)
                     .appFont(.caption)
