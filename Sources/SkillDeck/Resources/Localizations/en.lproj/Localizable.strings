@@ -104,3 +104,4 @@
 "usage.agent.scanning" = "Scanning usage...";
 "usage.agent.unreadable" = "Local history could not be read";
 "usage.agent.unavailable" = "No local history";
+"usage.stale.help" = "The latest refresh could not read history; showing counts from the previous scan.";

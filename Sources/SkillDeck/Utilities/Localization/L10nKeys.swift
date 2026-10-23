@@ -102,6 +102,7 @@ enum L10nKeys {
     static let usageAgentScanning = "usage.agent.scanning"
     static let usageAgentUnreadable = "usage.agent.unreadable"
     static let usageAgentUnavailable = "usage.agent.unavailable"
+    static let usageStaleHelp = "usage.stale.help"
 
     static let allKeys: [String] = [
         appName,
@@ -188,5 +189,6 @@ enum L10nKeys {
         usageAgentScanning,
         usageAgentUnreadable,
         usageAgentUnavailable,
+        usageStaleHelp,
     ]
 }

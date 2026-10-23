@@ -104,3 +104,4 @@
 "usage.agent.scanning" = "正在扫描使用记录…";
 "usage.agent.unreadable" = "本地历史无法读取";
 "usage.agent.unavailable" = "无本地历史记录";
+"usage.stale.help" = "最近一次刷新无法读取历史记录，当前显示上次扫描的计数。";
