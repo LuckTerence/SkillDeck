@@ -114,15 +114,32 @@ final class DashboardViewModel {
     }
 
     /// True before or while the relevant scans finish; freezes ordering and shows a spinner.
+    ///
+    /// This intentionally ignores forced refreshes: when previous counts exist, the list must keep
+    /// its current order and badges while new data is loading. Only first scans freeze the list.
     var isRelevantUsagePending: Bool {
         hasUnscannedRelevantUsage || isRelevantUsageScanning
+    }
+
+    /// True while a forced refresh for one of the relevant Agents is in flight. Separate from
+    /// `isRelevantUsagePending` so ordering and badges stay stable during an in-place refresh.
+    var isRelevantUsageRefreshing: Bool {
+        relevantUsageAgents.contains { skillManager.isRefreshingSkillUsage($0) }
+    }
+
+    /// Whether the current scope has any Agent with a usage provider. When it is false, a manual
+    /// refresh would be a no-op, so the toolbar hides the control instead of showing a dead button.
+    var canRefreshRelevantUsage: Bool {
+        !relevantUsageAgents.isEmpty
     }
 
     /// Failed log count restricted to the current scope, used by `isPartial`.
     var relevantUsageFailedLogCount: Int {
         relevantUsageAgents.reduce(0) { total, agent in
             switch skillManager.skillUsageScanState(for: agent) {
-            case .available(_, _, let failed), .failed(let failed):
+            case .available(_, _, let failed),
+                 .stale(let failed),
+                 .failed(let failed):
                 return total + failed
             default:
                 return total
@@ -143,11 +160,15 @@ final class DashboardViewModel {
         var agentCounts: [AgentType: Int] = [:]
 
         for agent in relevantUsageAgents {
-            guard case .available = skillManager.skillUsageScanState(for: agent) else {
+            switch skillManager.skillUsageScanState(for: agent) {
+            case .available, .stale:
+                // `.stale` keeps the previous readable snapshot, so its counts still participate
+                // in sorting and badges. `isPartial` below carries the warning.
+                agentCounts[agent] = skillManager.skillUsage(for: skill.id, agent: agent)?
+                    .detectedInvocationCount ?? 0
+            default:
                 continue
             }
-            agentCounts[agent] = skillManager.skillUsage(for: skill.id, agent: agent)?
-                .detectedInvocationCount ?? 0
         }
 
         guard !agentCounts.isEmpty else { return nil }
@@ -156,6 +177,57 @@ final class DashboardViewModel {
             count: agentCounts.values.reduce(0, +),
             agentCounts: agentCounts,
             isPartial: isRelevantUsagePending || relevantUsageFailedLogCount > 0
+        )
+    }
+
+    // MARK: - Usage Refresh
+
+    /// Minimum interval between automatic refreshes triggered by window activation.
+    /// Manual refresh ignores this interval.
+    static let usageAutoRefreshInterval: TimeInterval = 5 * 60
+
+    /// Manually rescan usage for every Agent in the current scope.
+    ///
+    /// This ignores the automatic throttle; `SkillManager` deduplicates concurrent scans, and it
+    /// refreshes the attempt timestamp so an automatic refresh will not immediately follow.
+    func refreshRelevantUsage() async {
+        let agents = Set(relevantUsageAgents)
+        guard !agents.isEmpty else { return }
+        await skillManager.loadSkillUsage(
+            forceRefresh: true,
+            agentTypes: agents
+        )
+    }
+
+    /// Entry point for window activation and the initial Dashboard appearance.
+    ///
+    /// The authoritative throttle lives in `SkillManager.reserveAutomaticSkillUsageRefresh` so
+    /// multiple windows cannot both pass it. The guards here are only cheap pre-checks to avoid
+    /// main-actor work when a refresh obviously cannot start.
+    ///
+    /// - Parameter isDetailOpen: The split view keeps the Dashboard list visible while a skill
+    ///   detail is open in the right pane. Automatic refresh is skipped then: activation should
+    ///   not silently reshuffle the list the user is currently working from. Manual refresh
+    ///   remains available because it is an explicit action.
+    func autoRefreshRelevantUsage(
+        now: Date = Date(),
+        isDetailOpen: Bool = false
+    ) async {
+        guard !isDetailOpen else { return }
+        guard sortOrder == .usage else { return }
+        guard !relevantUsageAgents.isEmpty else { return }
+        guard !isRelevantUsagePending, !isRelevantUsageRefreshing else { return }
+
+        let reserved = skillManager.reserveAutomaticSkillUsageRefresh(
+            agentTypes: Set(relevantUsageAgents),
+            minimumInterval: Self.usageAutoRefreshInterval,
+            now: now
+        )
+        guard !reserved.isEmpty else { return }
+
+        await skillManager.loadSkillUsage(
+            forceRefresh: true,
+            agentTypes: reserved
         )
     }
 

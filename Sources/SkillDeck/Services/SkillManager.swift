@@ -111,6 +111,16 @@ final class SkillManager {
     /// Current coverage state per Agent. Missing entries mean `.notScanned`.
     var skillUsageScanStates: [AgentType: SkillUsageScanState] = [:]
 
+    /// Agents whose forced rescan is in flight. Kept separate from `skillUsageScanStates` so the
+    /// previous records and coverage state stay visible while a refresh runs. A first scan still
+    /// uses `.scanning`, because there is no previous data to preserve.
+    private(set) var skillUsageRefreshingAgents: Set<AgentType> = []
+
+    /// Monotonic timestamp of the latest scan attempt per Agent. Written when a scan is
+    /// reserved/started and read only for throttling automatic refreshes. It is not persisted:
+    /// after a relaunch the existing lazy first scan runs again.
+    private(set) var skillUsageLastScanAttemptAt: [AgentType: Date] = [:]
+
     // MARK: - App Update State (application self-update status)
 
     /// Latest release info (nil means no update available or not yet checked)
@@ -192,15 +202,51 @@ final class SkillManager {
                 return false
             }
             let state = skillUsageScanState(for: provider.agentType)
-            if state == .scanning {
-                return false
-            }
+            // A first scan or an in-flight refresh already owns this Agent. Skipping here also
+            // deduplicates concurrent forced refreshes from multiple windows.
+            if state == .scanning { return false }
+            if skillUsageRefreshingAgents.contains(provider.agentType) { return false }
             return forceRefresh || state == .notScanned
         }
         guard !providers.isEmpty else { return }
 
-        for provider in providers {
-            skillUsageScanStates[provider.agentType] = .scanning
+        let selectedAgents = Set(providers.map(\.agentType))
+        let attemptAt = Date()
+        var appliedAgents: Set<AgentType> = []
+
+        // `defer` in Swift runs when the enclosing scope exits on every path (like Java's
+        // `finally`). Note: it does NOT run at the instant the parent task is cancelled;
+        // `withTaskGroup` waits for every child scan to finish first.
+        defer {
+            for agent in selectedAgents {
+                skillUsageRefreshingAgents.remove(agent)
+
+                // A first scan that never produced a result must become retryable instead of
+                // leaving a permanent spinner. Refreshes keep their previous state.
+                if !appliedAgents.contains(agent),
+                   skillUsageScanState(for: agent) == .scanning {
+                    skillUsageScanStates[agent] = .notScanned
+                }
+            }
+        }
+
+        for agent in selectedAgents {
+            // Monotonic write: an injected/reserved future timestamp must never move backwards
+            // just because the real clock is earlier.
+            skillUsageLastScanAttemptAt[agent] = max(
+                skillUsageLastScanAttemptAt[agent] ?? .distantPast,
+                attemptAt
+            )
+
+            if skillUsageScanState(for: agent) == .notScanned {
+                // First scan: preserve the existing semantics so the Dashboard freezes ordering
+                // and shows a loading placeholder (there is no previous data to display).
+                skillUsageScanStates[agent] = .scanning
+            } else {
+                // Forced refresh: keep the previous state and records visible. The separate
+                // refresh set only drives spinner/deduplication.
+                skillUsageRefreshingAgents.insert(agent)
+            }
         }
 
         let results = await withTaskGroup(
@@ -220,22 +266,99 @@ final class SkillManager {
             return collected
         }
 
+        // Cancellation is observed only after the group drains, not preemptively. Reaching this
+        // line means every child scan has finished; discard their results and let `defer` clear
+        // the in-flight markers. Providers currently perform synchronous file I/O without
+        // checking cancellation, so this is the earliest safe cleanup point.
+        if Task.isCancelled { return }
+
         for (agentType, result) in results {
-            skillUsageRecords[agentType] = result.records
-            if result.scannedLogCount > 0 {
-                skillUsageScanStates[agentType] = .available(
-                    scannedLogCount: result.scannedLogCount,
-                    preservedLogCount: result.preservedLogCount,
-                    failedLogCount: result.failedLogCount
-                )
-            } else if result.failedLogCount > 0 {
-                // A source exists but none of it could be read. Keep this distinct from
-                // `.unavailable` so the UI can warn instead of claiming there is no history.
-                skillUsageScanStates[agentType] = .failed(failedLogCount: result.failedLogCount)
-            } else {
-                skillUsageScanStates[agentType] = .unavailable
-            }
+            applyScanResult(result, for: agentType)
+            appliedAgents.insert(agentType)
         }
+    }
+
+    /// Apply one Agent's scan result while preserving the last readable snapshot on total failure.
+    ///
+    /// Providers report files they could not read via `failedLogCount`, including files restored
+    /// from their cache (those contribute to `scannedLogCount` with `preservedLogCount`). Therefore
+    /// zero scanned logs plus failures means this attempt produced nothing usable.
+    private func applyScanResult(
+        _ result: SkillUsageScanResult,
+        for agentType: AgentType
+    ) {
+        let previousState = skillUsageScanState(for: agentType)
+        let previousWasReadable: Bool = {
+            switch previousState {
+            case .available, .stale: return true
+            case .notScanned, .scanning, .failed, .unavailable: return false
+            }
+        }()
+
+        let producedNothing = result.scannedLogCount == 0 && result.failedLogCount > 0
+
+        if producedNothing && previousWasReadable {
+            // Keep the last readable snapshot instead of replacing it with empty data. The UI
+            // shows the counts with a warning because they may be out of date.
+            skillUsageScanStates[agentType] = .stale(
+                failedLogCount: result.failedLogCount
+            )
+            return
+        }
+
+        // A history source that disappeared (no scanned logs and no failures) is not a read
+        // error: clear the records so the UI stops presenting a stale count.
+        skillUsageRecords[agentType] = result.records
+
+        if result.scannedLogCount > 0 {
+            skillUsageScanStates[agentType] = .available(
+                scannedLogCount: result.scannedLogCount,
+                preservedLogCount: result.preservedLogCount,
+                failedLogCount: result.failedLogCount
+            )
+        } else if result.failedLogCount > 0 {
+            // A source exists but none of it could be read. Keep this distinct from
+            // `.unavailable` so the UI can warn instead of claiming there is no history.
+            skillUsageScanStates[agentType] = .failed(failedLogCount: result.failedLogCount)
+        } else {
+            skillUsageScanStates[agentType] = .unavailable
+        }
+    }
+
+    /// Atomically checks the throttle and reserves eligible Agents for an automatic refresh.
+    ///
+    /// `SkillManager` is `@MainActor`, and this method contains no `await`, so the
+    /// read-check-write sequence cannot interleave with another window's call. Reserving writes
+    /// `skillUsageLastScanAttemptAt` immediately: a second caller is throttled even if the first
+    /// scan completes before that caller runs.
+    ///
+    /// - Returns: Agents reserved by this call. Empty when none are eligible.
+    func reserveAutomaticSkillUsageRefresh(
+        agentTypes: Set<AgentType>,
+        minimumInterval: TimeInterval,
+        now: Date = Date()
+    ) -> Set<AgentType> {
+        var reserved: Set<AgentType> = []
+
+        for agent in agentTypes where isSkillUsageSupported(agent) {
+            let state = skillUsageScanState(for: agent)
+
+            // Never start the first scan from a window activation; that remains the lazy
+            // Dashboard/filter path. `.scanning` already owns an in-flight first scan.
+            guard state != .notScanned, state != .scanning else { continue }
+            guard !skillUsageRefreshingAgents.contains(agent) else { continue }
+
+            if let last = skillUsageLastScanAttemptAt[agent],
+               now.timeIntervalSince(last) < minimumInterval {
+                continue
+            }
+
+            // The reservation itself is the throttle latch, written before the async scan starts.
+            skillUsageLastScanAttemptAt[agent] = now
+            reserved.insert(agent)
+        }
+
+        return reserved
     }
 
     /// Return usage evidence for one skill and Agent after the shared index has been loaded.
@@ -247,6 +370,17 @@ final class SkillManager {
         skillUsageScanStates[agent] ?? .notScanned
     }
 
+    /// Whether a forced rescan (not a first scan) is currently running for this Agent.
+    func isRefreshingSkillUsage(_ agent: AgentType) -> Bool {
+        skillUsageRefreshingAgents.contains(agent)
+    }
+
+    /// Timestamp of the latest scan attempt for this Agent. Exposed for throttle tests and future
+    /// diagnostics; the UI reads the derived refresh state instead.
+    func skillUsageLastScanAttemptDate(for agent: AgentType) -> Date? {
+        skillUsageLastScanAttemptAt[agent]
+    }
+
     func isSkillUsageSupported(_ agent: AgentType) -> Bool {
         skillUsageProviders[agent] != nil
     }
@@ -256,8 +390,13 @@ final class SkillManager {
         AgentType.allCases.filter { skillUsageProviders[$0] != nil }
     }
 
+    /// True while any first scan or forced refresh is in flight, so detail-page controls can
+    /// show one spinner for both cases.
     var isScanningSkillUsage: Bool {
-        skillUsageProviders.keys.contains { skillUsageScanState(for: $0) == .scanning }
+        !skillUsageRefreshingAgents.isEmpty
+            || skillUsageProviders.keys.contains {
+                skillUsageScanState(for: $0) == .scanning
+            }
     }
 
     var hasUnscannedSkillUsage: Bool {
@@ -267,9 +406,9 @@ final class SkillManager {
     var skillUsageFailedLogCount: Int {
         skillUsageScanStates.values.reduce(0) { partial, state in
             switch state {
-            case .available(_, _, let failedLogCount):
-                return partial + failedLogCount
-            case .failed(let failedLogCount):
+            case .available(_, _, let failedLogCount),
+                 .stale(let failedLogCount),
+                 .failed(let failedLogCount):
                 return partial + failedLogCount
             case .notScanned, .scanning, .unavailable:
                 return partial
