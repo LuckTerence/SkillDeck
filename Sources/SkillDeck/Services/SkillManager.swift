@@ -93,7 +93,7 @@ final class SkillManager {
         let canonicalPath: String
         let formatVersion: Int?
 
-        init(skillId: String, canonicalPath: String, formatVersion: Int? = 2) {
+        init(skillId: String, canonicalPath: String, formatVersion: Int? = nil) {
             self.skillId = skillId
             self.canonicalPath = canonicalPath
             self.formatVersion = formatVersion
