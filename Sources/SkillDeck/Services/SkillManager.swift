@@ -91,6 +91,13 @@ final class SkillManager {
     struct BackupManifest: Codable {
         let skillId: String
         let canonicalPath: String
+        let formatVersion: Int?
+
+        init(skillId: String, canonicalPath: String, formatVersion: Int? = 2) {
+            self.skillId = skillId
+            self.canonicalPath = canonicalPath
+            self.formatVersion = formatVersion
+        }
     }
 
     // MARK: - Published State (UI-bound state)
@@ -208,13 +215,17 @@ final class SkillManager {
     var translationPackPrompt: TranslationPackPrompt?
     private var cancellables = Set<AnyCancellable>()
 
+    private let userDefaults: UserDefaults
+
     // MARK: - Initialization
 
     init(
         gitService: any GitServiceProtocol = GitService(),
         lockFileManager: LockFileManager = LockFileManager(),
         commitHashCache: CommitHashCache = CommitHashCache(),
-        skillUsageProviders: [any SkillUsageProvider] = SkillUsageProviderFactory.makeDefaultProviders()
+        skillUsageProviders: [any SkillUsageProvider] = SkillUsageProviderFactory.makeDefaultProviders(),
+        userDefaults: UserDefaults = .standard,
+        recoveryRoots: [URL]? = nil
     ) {
         self.gitService = gitService
         self.lockFileManager = lockFileManager
@@ -223,7 +234,8 @@ final class SkillManager {
             skillUsageProviders.map { ($0.agentType, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        Self.recoverAllOrphanBackups()
+        self.userDefaults = userDefaults
+        Self.recoverAllOrphanBackups(directoriesToScan: recoveryRoots, userDefaults: userDefaults)
         setupFileWatcher()
     }
 
@@ -621,6 +633,13 @@ final class SkillManager {
     /// and the source Agent's symlink will be deleted in step 1; even if not deleted, after the canonical directory is removed
     /// they become dangling symlinks, which don't affect functionality
     func deleteSkill(_ skill: Skill) async throws {
+        guard !isUpdatingAllSkills else {
+            throw SkillUpdateError.batchUpdateInProgress
+        }
+        guard !updatingSkillIDs.contains(skill.id) else {
+            throw SkillUpdateError.individualUpdateInProgress
+        }
+
         // 1. Remove all direct installation symlinks (skip inherited installations)
         for installation in skill.installations where installation.isSymlink && !installation.isInherited {
             try SymlinkManager.removeSymlink(
@@ -1017,6 +1036,7 @@ final class SkillManager {
                 let remoteCommitHash = try await gitService.getCommitHash(in: repoDir)
 
                 for skill in groupSkills {
+                    guard skills.contains(where: { $0.id == skill.id }) else { continue }
                     guard let lockEntry = skill.lockEntry else { continue }
 
                     // Derive folderPath from skillPath
@@ -1137,15 +1157,18 @@ final class SkillManager {
                 }
             }
 
-            // 2. Move existing canonical directory to same-volume hidden backup and write manifest
+            // 2. Prepare backup container and manifest before moving canonical directory
             if fm.fileExists(atPath: canonicalDir.path) {
-                try fm.moveItem(at: canonicalDir, to: backupURL)
+                try fm.createDirectory(at: backupURL, withIntermediateDirectories: true)
                 didBackup = true
-                Self.registerActiveBackup(backupURL.path)
 
-                let manifest = BackupManifest(skillId: skill.id, canonicalPath: canonicalDir.path)
+                let manifest = BackupManifest(skillId: skill.id, canonicalPath: canonicalDir.path, formatVersion: 2)
                 let data = try JSONEncoder().encode(manifest)
                 try data.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
+                Self.registerActiveBackup(backupURL.path, userDefaults: userDefaults)
+
+                let backupContentURL = backupURL.appendingPathComponent("content")
+                try fm.moveItem(at: canonicalDir, to: backupContentURL)
             }
 
             // 3. Atomically swap staged files to canonical location
@@ -1164,8 +1187,10 @@ final class SkillManager {
 
             // 6. Clean up backup directory and unregister
             if didBackup {
-                Self.unregisterActiveBackup(backupURL.path)
                 try? fm.removeItem(at: backupURL)
+                if !fm.fileExists(atPath: backupURL.path) {
+                    Self.unregisterActiveBackup(backupURL.path, userDefaults: userDefaults)
+                }
             }
         } catch {
             // Full rollback on failure
@@ -1173,10 +1198,24 @@ final class SkillManager {
                 try? fm.removeItem(at: canonicalDir)
             }
             if didBackup {
-                let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
-                try? fm.removeItem(at: manifestURL)
-                try? fm.moveItem(at: backupURL, to: canonicalDir)
-                Self.unregisterActiveBackup(backupURL.path)
+                let backupContentURL = backupURL.appendingPathComponent("content")
+                if fm.fileExists(atPath: backupContentURL.path) {
+                    do {
+                        try fm.moveItem(at: backupContentURL, to: canonicalDir)
+                        try? fm.removeItem(at: backupURL)
+                        if !fm.fileExists(atPath: backupURL.path) {
+                            Self.unregisterActiveBackup(backupURL.path, userDefaults: userDefaults)
+                        }
+                    } catch {
+                        // Restore move failed (e.g. disk permission error); keep container and manifest for startup recovery
+                    }
+                } else {
+                    // canonicalDir was never moved; clean up empty backup container
+                    try? fm.removeItem(at: backupURL)
+                    if !fm.fileExists(atPath: backupURL.path) {
+                        Self.unregisterActiveBackup(backupURL.path, userDefaults: userDefaults)
+                    }
+                }
             }
             throw error
         }
@@ -1286,6 +1325,11 @@ final class SkillManager {
                 let newCommitHash = try await gitService.getCommitHash(in: repoDir)
 
                 for skill in groupSkills {
+                    guard skills.contains(where: { $0.id == skill.id }) else {
+                        processedInGroup += 1
+                        batchUpdateCompleted += 1
+                        continue
+                    }
                     guard let lockEntry = skill.lockEntry else {
                         processedInGroup += 1
                         batchUpdateCompleted += 1
@@ -1362,7 +1406,7 @@ final class SkillManager {
         }()
 
         for dir in Array(Set(baseDirs)) {
-            recoverOrphanBackups(in: dir)
+            recoverOrphanBackups(in: dir, userDefaults: userDefaults)
         }
 
         if let tracked = userDefaults.stringArray(forKey: activeBackupsKey), !tracked.isEmpty {
@@ -1370,10 +1414,10 @@ final class SkillManager {
             for path in tracked {
                 let backupURL = URL(fileURLWithPath: path)
                 let parentDir = backupURL.deletingLastPathComponent()
-                if recoverOrphanBackups(in: parentDir) {
-                    // Successfully accessed and scanned parent directory; orphan backup handled
+                if recoverOrphanBackups(in: parentDir, userDefaults: userDefaults) {
+                    // Successfully accessed, scanned, and finalized; orphan backup handled
                 } else {
-                    // Parent directory was unreachable (e.g. disk disconnected); preserve entry
+                    // Parent directory was unreachable or unfinalized backups remain; preserve entry
                     remainingPaths.append(path)
                 }
             }
@@ -1386,11 +1430,17 @@ final class SkillManager {
     }
 
     /// Scan a single directory for leftover `.skilldeck-tmp-*` backup directories and recover or clean up.
-    /// Returns true if directory was accessed and scanned, false if unreachable.
+    /// Returns true if all orphan backups in the directory were finalized (recovered or cleaned up),
+    /// false if unreachable or unfinalized backups remain.
     @discardableResult
-    static func recoverOrphanBackups(in directory: URL = SkillScanner.sharedSkillsURL) -> Bool {
+    static func recoverOrphanBackups(
+        in directory: URL = SkillScanner.sharedSkillsURL,
+        userDefaults: UserDefaults = .standard
+    ) -> Bool {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(atPath: directory.path) else { return false }
+        var allFinalized = true
+
         for item in items {
             // Clean up any abandoned staging directories
             if item.hasPrefix(".skilldeck-stage-") {
@@ -1407,21 +1457,55 @@ final class SkillManager {
                 let canonicalURL = URL(fileURLWithPath: manifest.canonicalPath)
                 // Boundary check: ensure canonical path resides in the directory being scanned
                 guard canonicalURL.deletingLastPathComponent().resolvingSymlinksInPath().path == directory.resolvingSymlinksInPath().path else {
+                    // Boundary mismatch (e.g. migration or config drift): preserve files, but allow finalization
                     continue
                 }
                 if !fm.fileExists(atPath: canonicalURL.path) {
-                    try? fm.removeItem(at: manifestURL)
-                    try? fm.moveItem(at: backupURL, to: canonicalURL)
+                    let isContainer = (manifest.formatVersion ?? 1) >= 2
+                    let contentURL = backupURL.appendingPathComponent("content")
+
+                    do {
+                        if isContainer {
+                            guard fm.fileExists(atPath: contentURL.path) else {
+                                allFinalized = false
+                                continue
+                            }
+                            try fm.moveItem(at: contentURL, to: canonicalURL)
+                            try? fm.removeItem(at: backupURL)
+                        } else {
+                            // Legacy flat format fallback
+                            try fm.moveItem(at: backupURL, to: canonicalURL)
+                            let legacyManifest = canonicalURL.appendingPathComponent(".skilldeck-manifest.json")
+                            try? fm.removeItem(at: legacyManifest)
+                        }
+
+                        if fm.fileExists(atPath: backupURL.path) {
+                            allFinalized = false
+                        } else {
+                            Self.unregisterActiveBackup(backupURL.path, userDefaults: userDefaults)
+                        }
+                    } catch {
+                        allFinalized = false
+                    }
                 } else {
+                    // Canonical directory already exists (e.g. swap succeeded previously); clean up backup
                     try? fm.removeItem(at: backupURL)
+                    if fm.fileExists(atPath: backupURL.path) {
+                        allFinalized = false
+                    } else {
+                        Self.unregisterActiveBackup(backupURL.path, userDefaults: userDefaults)
+                    }
                 }
             } else {
                 // Missing manifest or corrupted: conservatively preserve to prevent data loss.
-                // Do NOT delete, as this might be the only surviving copy of user skill files.
+                // Note: Marking this directory as unfinalized (allFinalized = false) intentionally preserves
+                // the backup path record in UserDefaults. While this may leave a persistent entry for an
+                // unreadable backup, retaining the recovery pointer is strictly safer than silently dropping it.
+                allFinalized = false
                 continue
             }
         }
-        return true
+        return allFinalized
     }
 
     // MARK: - Helper Methods

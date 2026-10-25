@@ -63,9 +63,13 @@ actor MockGitService: GitServiceProtocol {
 final class BatchUpdateTests: XCTestCase {
 
     private var tempDir: URL!
+    private var testDefaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() async throws {
         try await super.setUp()
+        suiteName = "SkillDeckBatchTests-\(UUID().uuidString)"
+        testDefaults = UserDefaults(suiteName: suiteName)!
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("SkillDeckBatchTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -82,6 +86,9 @@ final class BatchUpdateTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        if let suiteName = suiteName {
+            testDefaults?.removePersistentDomain(forName: suiteName)
+        }
         if let tempDir = tempDir {
             try? FileManager.default.removeItem(at: tempDir)
         }
@@ -98,7 +105,9 @@ final class BatchUpdateTests: XCTestCase {
         return SkillManager(
             gitService: gitService,
             lockFileManager: LockFileManager(filePath: lockURL),
-            commitHashCache: CommitHashCache(filePath: cacheURL)
+            commitHashCache: CommitHashCache(filePath: cacheURL),
+            userDefaults: testDefaults,
+            recoveryRoots: []
         )
     }
 
@@ -438,5 +447,116 @@ final class BatchUpdateTests: XCTestCase {
 
         let remaining = testDefaults.stringArray(forKey: "SkillDeck.ActiveBackupPaths")
         XCTAssertEqual(remaining, [nonexistentBackup.path], "Unreachable external backup path should be retained in UserDefaults for future recovery")
+    }
+
+    // MARK: - P0 Hardening & Recovery Tests
+
+    func testOrphanRecovery_RestoresSkill_FromContainerFormat() throws {
+        let testDir = tempDir.appendingPathComponent("container-test")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+
+        let skillId = "container-skill"
+        let backupURL = testDir.appendingPathComponent(".skilldeck-tmp-\(skillId)-\(UUID().uuidString)")
+        let contentURL = backupURL.appendingPathComponent("content")
+        try FileManager.default.createDirectory(at: contentURL, withIntermediateDirectories: true)
+        try "container skill content".write(to: contentURL.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
+        let canonicalDir = testDir.appendingPathComponent(skillId)
+        let manifest = SkillManager.BackupManifest(skillId: skillId, canonicalPath: canonicalDir.path, formatVersion: 2)
+        let manifestData = try JSONEncoder().encode(manifest)
+        try manifestData.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
+
+        let finalized = SkillManager.recoverOrphanBackups(in: testDir, userDefaults: testDefaults)
+
+        XCTAssertTrue(finalized)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalDir.appendingPathComponent("SKILL.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+    }
+
+    func testRecovery_SkillWithContentSubdirectory_LegacyVsContainerFormat() throws {
+        // Critical compatibility test: A legacy skill that naturally contains a "content/" folder.
+        // Format version 1 (nil) must NOT be fooled into treating content/ as the backup container.
+        let testDir = tempDir.appendingPathComponent("legacy-content-subfolder-test")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+
+        let skillId = "media-skill"
+        let backupURL = testDir.appendingPathComponent(".skilldeck-tmp-\(skillId)-\(UUID().uuidString)")
+        let userContentSubdir = backupURL.appendingPathComponent("content")
+        try FileManager.default.createDirectory(at: userContentSubdir, withIntermediateDirectories: true)
+        try "root skill doc".write(to: backupURL.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try "subfolder article".write(to: userContentSubdir.appendingPathComponent("article.txt"), atomically: true, encoding: .utf8)
+
+        let canonicalDir = testDir.appendingPathComponent(skillId)
+        // Legacy format: formatVersion is nil
+        let manifest = SkillManager.BackupManifest(skillId: skillId, canonicalPath: canonicalDir.path, formatVersion: nil)
+        let manifestData = try JSONEncoder().encode(manifest)
+        try manifestData.write(to: backupURL.appendingPathComponent(".skilldeck-manifest.json"))
+
+        let finalized = SkillManager.recoverOrphanBackups(in: testDir, userDefaults: testDefaults)
+
+        XCTAssertTrue(finalized)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalDir.appendingPathComponent("SKILL.md").path), "Root files in legacy backup must be restored")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalDir.appendingPathComponent("content/article.txt").path), "Subdirectories in legacy backup must be preserved")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: canonicalDir.appendingPathComponent(".skilldeck-manifest.json").path), "Manifest should be cleaned from canonicalDir")
+    }
+
+    func testRecovery_PreservesBackupAndManifest_WhenRestoreMoveFails() throws {
+        let testDir = tempDir.appendingPathComponent("recovery-fail-test")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+
+        let skillId = "fail-skill"
+        let backupURL = testDir.appendingPathComponent(".skilldeck-tmp-\(skillId)-\(UUID().uuidString)")
+        let contentURL = backupURL.appendingPathComponent("content")
+        try FileManager.default.createDirectory(at: contentURL, withIntermediateDirectories: true)
+        try "some content".write(to: contentURL.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
+        let canonicalDir = testDir.appendingPathComponent(skillId)
+        let manifest = SkillManager.BackupManifest(skillId: skillId, canonicalPath: canonicalDir.path, formatVersion: 2)
+        let manifestData = try JSONEncoder().encode(manifest)
+        let manifestURL = backupURL.appendingPathComponent(".skilldeck-manifest.json")
+        try manifestData.write(to: manifestURL)
+
+        SkillManager.registerActiveBackup(backupURL.path, userDefaults: testDefaults)
+
+        // Make testDir read-only so moveItem fails with permission denied
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: testDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: testDir.path)
+        }
+
+        let finalized = SkillManager.recoverOrphanBackups(in: testDir, userDefaults: testDefaults)
+
+        XCTAssertFalse(finalized, "Recovery must be marked unfinalized when move fails")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path), "Backup directory must be preserved on move failure")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: manifestURL.path), "Manifest must be preserved on move failure")
+    }
+
+    func testIsolation_DoesNotPolluteStandardUserDefaults() async throws {
+        let initialTracked = UserDefaults.standard.stringArray(forKey: "SkillDeck.ActiveBackupPaths")
+
+        let manager = SkillManager(
+            userDefaults: testDefaults,
+            recoveryRoots: []
+        )
+        _ = manager
+
+        let finalTracked = UserDefaults.standard.stringArray(forKey: "SkillDeck.ActiveBackupPaths")
+        XCTAssertEqual(initialTracked, finalTracked, "UserDefaults.standard must not be touched or modified during isolated test execution")
+    }
+
+    func testDeleteSkill_ThrowsWhenBatchUpdateInProgress() async throws {
+        let gitService = MockGitService()
+        let manager = makeIsolatedSkillManager(gitService: gitService)
+        let skill = try createTestSkill(id: "del-skill", repoURL: "https://github.com/test/repo", folderPath: "skills/del-skill")
+
+        manager.isUpdatingAllSkills = true
+        defer { manager.isUpdatingAllSkills = false }
+
+        do {
+            try await manager.deleteSkill(skill)
+            XCTFail("deleteSkill should throw batchUpdateInProgress when batch update is running")
+        } catch let error as SkillManager.SkillUpdateError {
+            XCTAssertEqual(error, .batchUpdateInProgress)
+        }
     }
 }
