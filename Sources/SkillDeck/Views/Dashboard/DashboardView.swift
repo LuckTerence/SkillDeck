@@ -16,6 +16,11 @@ struct DashboardView: View {
     @Environment(\.localizationBundle) private var localizationBundle
     @Environment(\.locale) private var locale
 
+    /// `scenePhase` reports the lifecycle of the enclosing window scene on macOS. Watching it
+    /// here means activation refreshes only happen while the Dashboard is in the view tree, not
+    /// while the user is on a detail page or the app is in the background.
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         Group {
             if skillManager.isLoading && skillManager.skills.isEmpty {
@@ -134,15 +139,30 @@ struct DashboardView: View {
                     }
                 }
 
-                if viewModel.sortOrder == .usage {
-                    if viewModel.isRelevantUsagePending {
+                if viewModel.sortOrder == .usage, viewModel.canRefreshRelevantUsage {
+                    if viewModel.isRelevantUsagePending || viewModel.isRelevantUsageRefreshing {
+                        // One spinner covers both the first lazy scan and an in-place refresh.
+                        // The refresh button is hidden meanwhile, so it cannot be clicked twice.
                         ProgressView()
                             .controlSize(.small)
                             .help(L10n.string(L10nKeys.usageScanning, bundle: localizationBundle, locale: locale))
-                    } else if viewModel.relevantUsageFailedLogCount > 0 {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .help(L10n.string(L10nKeys.usageIncompleteHelp, bundle: localizationBundle, locale: locale))
+                    } else {
+                        // `.stale` and partial failures both increment this count; the warning
+                        // stays visible while the refresh button below offers a retry.
+                        if viewModel.relevantUsageFailedLogCount > 0 {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .help(L10n.string(L10nKeys.usageIncompleteHelp, bundle: localizationBundle, locale: locale))
+                        }
+
+                        Button {
+                            Task { await viewModel.refreshRelevantUsage() }
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                        .controlSize(.small)
+                        .help(L10n.string(L10nKeys.usageRefreshHelp, bundle: localizationBundle, locale: locale))
+                        .accessibilityLabel(Text(L10n.string(L10nKeys.usageRefreshHelp, bundle: localizationBundle, locale: locale)))
                     }
                 }
             }
@@ -190,6 +210,19 @@ struct DashboardView: View {
             guard viewModel.sortOrder == .usage else { return }
             scanRelevantUsageIfNeeded()
         }
+        // Re-activating the window silently refreshes stale usage. The throttle lives in
+        // SkillManager, so multiple windows activating at once still produce at most one scan
+        // per Agent. First scans remain owned by `onChange(sortOrder)` above.
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            autoRefreshUsageIfNeeded()
+        }
+        // `.task` runs when the view appears. It covers the case where the window is already
+        // active at creation time, when `onChange(scenePhase)` will not fire. It is safe to call
+        // alongside the lazy first scan: that path sets `.scanning`, which the reservation skips.
+        .task {
+            autoRefreshUsageIfNeeded()
+        }
     }
 
     private func scanRelevantUsageIfNeeded() {
@@ -198,6 +231,15 @@ struct DashboardView: View {
             await skillManager.loadSkillUsage(
                 agentTypes: Set(viewModel.relevantUsageAgents)
             )
+        }
+    }
+
+    private func autoRefreshUsageIfNeeded() {
+        // The Dashboard list stays mounted while a detail is open in the split view's right
+        // pane, so window activation must not be treated as "Dashboard is focused".
+        let isDetailOpen = selectedSkillID != nil
+        Task {
+            await viewModel.autoRefreshRelevantUsage(isDetailOpen: isDetailOpen)
         }
     }
 

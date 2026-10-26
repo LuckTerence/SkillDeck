@@ -24,6 +24,10 @@ enum SkillUsageScanState: Equatable, Sendable {
     /// At least one history file contributes records (read now, cache hit, or preserved from
     /// the previous scan). `failedLogCount` may still be non-zero.
     case available(scannedLogCount: Int, preservedLogCount: Int, failedLogCount: Int)
+    /// The latest refresh could not read any history, so the previous scan's records were kept.
+    /// Counts are stale and must be shown with a warning. Distinct from `.failed`, which means
+    /// there is no trustworthy snapshot to display at all.
+    case stale(failedLogCount: Int)
     /// A history source exists, but none of it could be read and no cache is available.
     case failed(failedLogCount: Int)
     /// No history source exists on this machine.

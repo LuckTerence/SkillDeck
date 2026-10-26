@@ -301,6 +301,213 @@ final class DashboardUsageSortTests: XCTestCase {
         assertOrder(viewModel, ["a", "b"])
     }
 
+    // MARK: - In-place Refresh
+
+    /// A forced refresh must not freeze the list into name order or hide badges. Ordering changes
+    /// exactly once, when the new counts arrive.
+    @MainActor
+    func testRefreshingDoesNotFreezeUsageOrder() async {
+        let codex = GatedDashboardUsageProvider(agentType: .codex)
+        let manager = SkillManager(skillUsageProviders: [codex])
+        manager.skills = [
+            // Names are deliberately opposite to the usage order so a name-sort freeze is visible.
+            makeSkill(id: "a", name: "Zulu"),
+            makeSkill(id: "b", name: "Alpha"),
+        ]
+
+        let initial = Task { await manager.loadSkillUsage() }
+        await waitUntil { await codex.scanCount == 1 }
+        await codex.release(summaryResult(["a": 5, "b": 1]))
+        await initial.value
+
+        let viewModel = makeViewModel(manager: manager)
+        assertOrder(viewModel, ["a", "b"])
+
+        let refresh = Task { await manager.loadSkillUsage(forceRefresh: true) }
+        await waitUntil { await codex.scanCount == 2 }
+
+        XCTAssertFalse(viewModel.isRelevantUsagePending)
+        XCTAssertTrue(viewModel.isRelevantUsageRefreshing)
+        XCTAssertEqual(viewModel.usageSummary(for: manager.skills[0])?.count, 5)
+        assertOrder(viewModel, ["a", "b"])
+
+        await codex.release(summaryResult(["a": 1, "b": 9]))
+        await refresh.value
+
+        XCTAssertFalse(viewModel.isRelevantUsageRefreshing)
+        assertOrder(viewModel, ["b", "a"])
+    }
+
+    /// Two Dashboard windows sharing one manager must not both refresh the same Agent, even when
+    /// the first scan finishes before the second window's call runs.
+    @MainActor
+    func testAutoRefreshRelevantUsageIsAtomicAcrossCallers() async {
+        let codex = StubUsageProvider(agentType: .codex)
+        let manager = SkillManager(skillUsageProviders: [codex])
+        manager.skills = [makeSkill(id: "a", name: "Alpha")]
+        await manager.loadSkillUsage()
+
+        let viewModelA = makeViewModel(manager: manager)
+        let viewModelB = makeViewModel(manager: manager)
+        let expiredNow = Date().addingTimeInterval(
+            DashboardViewModel.usageAutoRefreshInterval + 60
+        )
+
+        async let first: Void = viewModelA.autoRefreshRelevantUsage(now: expiredNow)
+        async let second: Void = viewModelB.autoRefreshRelevantUsage(now: expiredNow)
+        _ = await (first, second)
+
+        let scanCount = await codex.scanCount
+        XCTAssertEqual(scanCount, 2) // initial scan + exactly one auto refresh
+    }
+
+    /// The Dashboard list stays mounted next to an open detail pane. Automatic refresh must be
+    /// suppressed there so window activation does not reshuffle the list behind the inspector.
+    @MainActor
+    func testAutoRefreshSkipsWhileDetailIsOpen() async {
+        let codex = StubUsageProvider(agentType: .codex)
+        let manager = SkillManager(skillUsageProviders: [codex])
+        manager.skills = [makeSkill(id: "a", name: "Alpha")]
+        await manager.loadSkillUsage()
+
+        let viewModel = makeViewModel(manager: manager)
+        let expiredNow = Date().addingTimeInterval(
+            DashboardViewModel.usageAutoRefreshInterval + 60
+        )
+
+        await viewModel.autoRefreshRelevantUsage(now: expiredNow, isDetailOpen: true)
+        let scanCountWithDetail = await codex.scanCount
+        XCTAssertEqual(scanCountWithDetail, 1)
+
+        // Closing the detail pane makes the Dashboard eligible again.
+        await viewModel.autoRefreshRelevantUsage(now: expiredNow, isDetailOpen: false)
+        let scanCountAfterClose = await codex.scanCount
+        XCTAssertEqual(scanCountAfterClose, 2)
+    }
+
+    /// An Agent without a usage provider produces an empty scope; the toolbar must not offer a
+    /// refresh control that would immediately return without doing anything.
+    @MainActor
+    func testRefreshControlIsHiddenWithoutRelevantAgent() {
+        let manager = makeManager(agents: [.codex])
+        manager.skills = [makeSkill(id: "a", name: "Alpha", agents: [.claudeCode])]
+        let viewModel = makeViewModel(manager: manager)
+
+        viewModel.selectedAgentFilter = .claudeCode
+        XCTAssertFalse(viewModel.canRefreshRelevantUsage)
+
+        viewModel.selectedAgentFilter = nil
+        XCTAssertTrue(viewModel.canRefreshRelevantUsage)
+    }
+
+    /// Window activation only refreshes when the Dashboard is in usage order.
+    @MainActor
+    func testAutoRefreshRelevantUsageRequiresUsageSort() async {
+        let codex = StubUsageProvider(agentType: .codex)
+        let manager = SkillManager(skillUsageProviders: [codex])
+        manager.skills = [makeSkill(id: "a", name: "Alpha")]
+        await manager.loadSkillUsage()
+
+        let viewModel = DashboardViewModel(skillManager: manager)
+        viewModel.sortOrder = .name
+        let expiredNow = Date().addingTimeInterval(
+            DashboardViewModel.usageAutoRefreshInterval + 60
+        )
+
+        await viewModel.autoRefreshRelevantUsage(now: expiredNow)
+        let scanCountInNameOrder = await codex.scanCount
+        XCTAssertEqual(scanCountInNameOrder, 1)
+
+        viewModel.sortOrder = .usage
+        await viewModel.autoRefreshRelevantUsage(now: expiredNow)
+        let scanCountInUsageOrder = await codex.scanCount
+        XCTAssertEqual(scanCountInUsageOrder, 2)
+    }
+
+    /// Automatic refresh never starts a first scan and never duplicates an in-flight one.
+    @MainActor
+    func testAutoRefreshSkipsPendingOrInFlight() async {
+        let expiredNow = Date().addingTimeInterval(
+            DashboardViewModel.usageAutoRefreshInterval + 60
+        )
+
+        // Never scanned: the lazy Dashboard path owns the first scan.
+        let unscannedProvider = StubUsageProvider(agentType: .codex)
+        let unscannedManager = SkillManager(skillUsageProviders: [unscannedProvider])
+        unscannedManager.skills = [makeSkill(id: "a", name: "Alpha")]
+        let unscannedViewModel = makeViewModel(manager: unscannedManager)
+        await unscannedViewModel.autoRefreshRelevantUsage(now: expiredNow)
+        let unscannedScanCount = await unscannedProvider.scanCount
+        XCTAssertEqual(unscannedScanCount, 0)
+
+        // First scan in flight.
+        let scanningManager = SkillManager(
+            skillUsageProviders: [StubUsageProvider(agentType: .codex)]
+        )
+        scanningManager.skills = [makeSkill(id: "a", name: "Alpha")]
+        scanningManager.skillUsageScanStates = [.codex: .scanning]
+        let scanningViewModel = makeViewModel(manager: scanningManager)
+        await scanningViewModel.autoRefreshRelevantUsage(now: expiredNow)
+        XCTAssertEqual(scanningManager.skillUsageScanState(for: .codex), .scanning)
+
+        // Forced refresh already in flight.
+        let gated = GatedDashboardUsageProvider(agentType: .codex)
+        let manager = SkillManager(skillUsageProviders: [gated])
+        manager.skills = [makeSkill(id: "a", name: "Alpha")]
+        manager.skillUsageScanStates = [.codex: availableState]
+        let viewModel = makeViewModel(manager: manager)
+
+        let refresh = Task { await manager.loadSkillUsage(forceRefresh: true) }
+        await waitUntil { await gated.scanCount == 1 }
+
+        await viewModel.autoRefreshRelevantUsage(now: expiredNow)
+        let gatedScanCount = await gated.scanCount
+        XCTAssertEqual(gatedScanCount, 1)
+
+        await gated.release(summaryResult([:]))
+        await refresh.value
+    }
+
+    // MARK: - Stale State
+
+    @MainActor
+    func testStaleStateIsIncludedInSummaryAndPartial() {
+        let manager = makeManager(agents: [.codex])
+        manager.skills = [makeSkill(id: "a", name: "Alpha")]
+        manager.skillUsageRecords = [.codex: ["a": record(5)]]
+        manager.skillUsageScanStates = [.codex: .stale(failedLogCount: 2)]
+
+        let viewModel = makeViewModel(manager: manager)
+
+        let summary = viewModel.usageSummary(for: manager.skills[0])
+        XCTAssertEqual(summary?.count, 5)
+        XCTAssertTrue(summary?.isPartial ?? false)
+        XCTAssertEqual(viewModel.relevantUsageFailedLogCount, 2)
+    }
+
+    @MainActor
+    func testStaleStateParticipatesInUsageSorting() {
+        let manager = makeManager(agents: [.claudeCode, .codex])
+        manager.skills = [
+            makeSkill(id: "a", name: "Alpha"),
+            makeSkill(id: "b", name: "Beta"),
+            makeSkill(id: "c", name: "Charlie"),
+        ]
+        manager.skillUsageRecords = [
+            .codex: ["a": record(1)],
+            .claudeCode: ["b": record(5)],
+        ]
+        manager.skillUsageScanStates = [
+            .codex: .stale(failedLogCount: 1),
+            .claudeCode: availableState,
+        ]
+
+        let viewModel = makeViewModel(manager: manager)
+
+        // Both counts participate; the unknown skill still sorts last.
+        assertOrder(viewModel, ["b", "a", "c"])
+    }
+
     // MARK: - Fixtures
 
     private var availableState: SkillUsageScanState {
@@ -309,6 +516,33 @@ final class DashboardUsageSortTests: XCTestCase {
 
     private func record(_ count: Int) -> SkillUsageRecord {
         SkillUsageRecord(detectedInvocationCount: count, lastDetectedAt: nil)
+    }
+
+    private func summaryResult(_ counts: [String: Int]) -> SkillUsageScanResult {
+        SkillUsageScanResult(
+            records: counts.mapValues { record($0) },
+            scannedLogCount: counts.isEmpty ? 0 : 1,
+            preservedLogCount: 0,
+            failedLogCount: 0
+        )
+    }
+
+    /// Polls the provider's actor-isolated counter while a scan is suspended on its continuation.
+    @MainActor
+    private func waitUntil(
+        timeout: TimeInterval = 2,
+        _ condition: @escaping @MainActor () async -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !(await condition()) {
+            if Date() >= deadline {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     @MainActor
@@ -362,15 +596,42 @@ final class DashboardUsageSortTests: XCTestCase {
     }
 }
 
-private struct StubUsageProvider: SkillUsageProvider {
-    let agentType: AgentType
+private actor StubUsageProvider: SkillUsageProvider {
+    nonisolated let agentType: AgentType
+    private(set) var scanCount = 0
+
+    init(agentType: AgentType) {
+        self.agentType = agentType
+    }
 
     func scan() async -> SkillUsageScanResult {
-        SkillUsageScanResult(
+        scanCount += 1
+        return SkillUsageScanResult(
             records: [:],
             scannedLogCount: 0,
             preservedLogCount: 0,
             failedLogCount: 0
         )
+    }
+}
+
+/// Like production providers, this one ignores cancellation and only finishes when released.
+private actor GatedDashboardUsageProvider: SkillUsageProvider {
+    nonisolated let agentType: AgentType
+    private var continuation: CheckedContinuation<SkillUsageScanResult, Never>?
+    private(set) var scanCount = 0
+
+    init(agentType: AgentType) {
+        self.agentType = agentType
+    }
+
+    func scan() async -> SkillUsageScanResult {
+        scanCount += 1
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release(_ result: SkillUsageScanResult) {
+        continuation?.resume(returning: result)
+        continuation = nil
     }
 }
