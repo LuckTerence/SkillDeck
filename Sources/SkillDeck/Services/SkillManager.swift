@@ -639,6 +639,10 @@ final class SkillManager {
         guard !updatingSkillIDs.contains(skill.id) else {
             throw SkillUpdateError.individualUpdateInProgress
         }
+        // Swift actor methods can interleave at await points. Reserve the ID so
+        // updates cannot recreate this skill while deletion or refresh is suspended.
+        updatingSkillIDs.insert(skill.id)
+        defer { updatingSkillIDs.remove(skill.id) }
 
         // 1. Remove all direct installation symlinks (skip inherited installations)
         for installation in skill.installations where installation.isSymlink && !installation.isInherited {
