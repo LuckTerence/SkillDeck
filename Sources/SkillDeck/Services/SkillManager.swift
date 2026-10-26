@@ -76,14 +76,17 @@ final class SkillManager {
         case invalidLockEntry
 
         var errorDescription: String? {
+            let resolution = LanguageSettings.currentResolution()
+            let key: String
             switch self {
             case .batchUpdateInProgress:
-                "Batch update is currently in progress. Please wait for it to complete."
+                key = L10nKeys.skillUpdateErrorBatchInProgress
             case .individualUpdateInProgress:
-                "An update is already in progress for this skill."
+                key = L10nKeys.skillUpdateErrorIndividualInProgress
             case .invalidLockEntry:
-                "Invalid skill lock entry."
+                key = L10nKeys.skillUpdateErrorInvalidLockEntry
             }
+            return L10n.string(key, bundle: resolution.bundle, locale: resolution.locale)
         }
     }
 

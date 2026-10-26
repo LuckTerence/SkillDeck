@@ -288,7 +288,11 @@ struct SidebarView: View {
                     }
                 }
                 .help(L10n.string(L10nKeys.sidebarHelpCheckAllUpdates, bundle: localizationBundle, locale: locale))
-                .disabled(skillManager.isCheckingUpdates)
+                .disabled(
+                    skillManager.isCheckingUpdates
+                        || skillManager.isUpdatingAllSkills
+                        || !skillManager.updatingSkillIDs.isEmpty
+                )
             }
 
             // F19: Batch update all skills with available updates
@@ -310,7 +314,11 @@ struct SidebarView: View {
                     }
                 }
                 .help(L10n.string(L10nKeys.sidebarHelpUpdateAllSkills, bundle: localizationBundle, locale: locale))
-                .disabled(skillManager.isUpdatingAllSkills || skillManager.isCheckingUpdates)
+                .disabled(
+                    skillManager.isUpdatingAllSkills
+                        || skillManager.isCheckingUpdates
+                        || !skillManager.updatingSkillIDs.isEmpty
+                )
             }
 
             // Refresh button: rescan file system

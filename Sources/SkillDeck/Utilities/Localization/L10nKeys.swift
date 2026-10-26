@@ -83,6 +83,10 @@ enum L10nKeys {
     static let sidebarHelpUpdateAllSkills = "sidebar.help.updateAllSkills"
     static let sidebarHelpRefreshSkills = "sidebar.help.refreshSkills"
 
+    static let skillUpdateErrorBatchInProgress = "skill.update.error.batchInProgress"
+    static let skillUpdateErrorIndividualInProgress = "skill.update.error.individualInProgress"
+    static let skillUpdateErrorInvalidLockEntry = "skill.update.error.invalidLockEntry"
+
     static let emptySelectSkillTitle = "empty.selectSkill.title"
     static let emptySelectSkillSubtitleList = "empty.selectSkill.subtitle.list"
     static let emptySelectSkillSubtitleRegistry = "empty.selectSkill.subtitle.registry"
@@ -172,6 +176,9 @@ enum L10nKeys {
         sidebarHelpCheckAllUpdates,
         sidebarHelpUpdateAllSkills,
         sidebarHelpRefreshSkills,
+        skillUpdateErrorBatchInProgress,
+        skillUpdateErrorIndividualInProgress,
+        skillUpdateErrorInvalidLockEntry,
         emptySelectSkillTitle,
         emptySelectSkillSubtitleList,
         emptySelectSkillSubtitleRegistry,
